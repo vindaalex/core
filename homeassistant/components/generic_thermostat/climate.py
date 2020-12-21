@@ -348,19 +348,19 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
         # Add listeners to track changes from the sensor and the heater's switch
         self.async_on_remove(
             async_track_state_change_event(
-                self.hass, self._sensor_entity_id, self._async_sensor_temperature_changed
+                self.hass, [self._sensor_entity_id], self._async_sensor_temperature_changed
             )
         )
         if self._is_heat_enabled:
             self.async_on_remove(
                 async_track_state_change_event(
-                    self.hass, self._heater_entity_id, self._async_switch_device_changed
+                    self.hass, [self._heater_entity_id], self._async_switch_device_changed
                 )
             )
         if self._is_cool_enabled:
             self.async_on_remove(
                 async_track_state_change_event(
-                    self.hass, self._ac_entity_id, self._async_switch_device_changed
+                    self.hass, [self._ac_entity_id], self._async_switch_device_changed
                 )
             )
 
@@ -382,7 +382,10 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
         def _async_startup(*_):
             """Init on startup."""
             sensor_state = self.hass.states.get(self._sensor_entity_id)
-            if sensor_state and sensor_state.state != STATE_UNKNOWN:
+            if sensor_state and sensor_state.state not in (
+                STATE_UNAVAILABLE,
+                STATE_UNKNOWN,
+            ):
                 self._async_update_current_temp(sensor_state)
                 self.async_write_ha_state()
 
@@ -391,7 +394,7 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
         else:
             self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _async_startup)
 
-        _async_startup(None)  # init the sensor
+
 
         # Check if we have an old state, if so, restore it
         old_state = await self.async_get_last_state()
@@ -488,10 +491,11 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
         await self._async_operate()
         self.async_write_ha_state()
 
-    async def _async_sensor_temperature_changed(self, entity_id, old_state, new_state):
+    async def _async_sensor_temperature_changed(self, event):
         """Handle temperature changes."""
+        new_state = event.data.get("new_state")
         _LOGGER.debug("Sensor temperature updated to %s", new_state.state)
-        if new_state.state is None or new_state.state == "None":
+        if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             await self._activate_emergency_stop()
             return
 
@@ -506,18 +510,21 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
 
         if sensor_state.last_updated < now - self._sensor_stale_duration:
             _LOGGER.debug("Time is %s, last changed is %s, stale duration is %s")
-            _LOGGER.debug("Sensor is stalled, call the emergency stop")
+            _LOGGER.warning("Sensor is stalled, call the emergency stop")
             await self._activate_emergency_stop()
 
         return
 
     @callback
-    def _async_switch_device_changed(self, entity_id, old_state, new_state):
+    def _async_switch_device_changed(self, event):
         """Handle device switch state changes."""
+        new_state = event.data.get("new_state")
+        old_state = event.data.get("old_state")
+        entity_id = event.data.get("entity_id")
         _LOGGER.debug(
             "Switch of %s changed from %s to %s", entity_id, old_state, new_state
         )
-        if new_state.state is None or new_state.state == "None":
+        if new_state is None:
             return
         self.async_write_ha_state()
 
@@ -640,7 +647,9 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
             return
         data = {ATTR_ENTITY_ID: self._heater_entity_id}
         _LOGGER.debug("Order ON sent to heater device %s", self._heater_entity_id)
-        await self.hass.services.async_call(HA_DOMAIN, SERVICE_TURN_ON, data)
+        await self.hass.services.async_call(
+            HA_DOMAIN, SERVICE_TURN_ON, data, context=self._context
+        )
 
     async def _async_heater_turn_off(self, force=False):
         """Turn heater toggleable device off."""
@@ -650,7 +659,9 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
             return
         data = {ATTR_ENTITY_ID: self._heater_entity_id}
         _LOGGER.debug("Order OFF sent to heater device %s", self._heater_entity_id)
-        await self.hass.services.async_call(HA_DOMAIN, SERVICE_TURN_OFF, data)
+        await self.hass.services.async_call(
+            HA_DOMAIN, SERVICE_TURN_OFF, data, context=self._context
+        )
 
     async def _async_ac_turn_on(self, force=False):
         """Turn ac toggleable device on."""
@@ -660,7 +671,9 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
             return
         data = {ATTR_ENTITY_ID: self._ac_entity_id}
         _LOGGER.debug("Order ON sent to AC device %s", self._ac_entity_id)
-        await self.hass.services.async_call(HA_DOMAIN, SERVICE_TURN_ON, data)
+        await self.hass.services.async_call(
+            HA_DOMAIN, SERVICE_TURN_ON, data, context=self._context
+        )
 
     async def _async_ac_turn_off(self, force=False):
         """Turn ac toggleable device off."""
@@ -670,7 +683,9 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
             return
         data = {ATTR_ENTITY_ID: self._ac_entity_id}
         _LOGGER.debug("Order OFF sent to AC device %s", self._ac_entity_id)
-        await self.hass.services.async_call(HA_DOMAIN, SERVICE_TURN_OFF, data)
+        await self.hass.services.async_call(
+            HA_DOMAIN, SERVICE_TURN_OFF, data, context=self._context
+        )
 
     async def _activate_emergency_stop(self):
         """Send an emergency OFF order to HVAC devices."""
