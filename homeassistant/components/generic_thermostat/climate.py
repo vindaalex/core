@@ -5,7 +5,7 @@ from typing import Callable, Dict
 
 import voluptuous as vol
 
-from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateDevice
+from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity
 from homeassistant.components.climate.const import (
     ATTR_HVAC_MODE,
     ATTR_PRESET_MODE,
@@ -34,6 +34,7 @@ from homeassistant.const import (
     STATE_OFF,
     STATE_ON,
     STATE_UNKNOWN,
+    STATE_UNAVAILABLE,
 )
 from homeassistant.core import DOMAIN as HA_DOMAIN, CoreState, callback
 from homeassistant.helpers import condition
@@ -272,7 +273,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     )
 
 
-class GenericThermostat(ClimateDevice, RestoreEntity):
+class GenericThermostat(ClimateEntity, RestoreEntity):
     """Representation of a Generic Thermostat device."""
 
     def __init__(
@@ -348,13 +349,17 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
         # Add listeners to track changes from the sensor and the heater's switch
         self.async_on_remove(
             async_track_state_change_event(
-                self.hass, [self._sensor_entity_id], self._async_sensor_temperature_changed
+                self.hass,
+                [self._sensor_entity_id],
+                self._async_sensor_temperature_changed,
             )
         )
         if self._is_heat_enabled:
             self.async_on_remove(
                 async_track_state_change_event(
-                    self.hass, [self._heater_entity_id], self._async_switch_device_changed
+                    self.hass,
+                    [self._heater_entity_id],
+                    self._async_switch_device_changed,
                 )
             )
         if self._is_cool_enabled:
@@ -393,8 +398,6 @@ class GenericThermostat(ClimateDevice, RestoreEntity):
             _async_startup()
         else:
             self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _async_startup)
-
-
 
         # Check if we have an old state, if so, restore it
         old_state = await self.async_get_last_state()
