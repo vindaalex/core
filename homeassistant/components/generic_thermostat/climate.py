@@ -1,6 +1,7 @@
 """Generic thermostat."""
 import asyncio
 import logging
+import datetime
 from typing import Callable, Dict
 
 import voluptuous as vol
@@ -370,10 +371,12 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             )
 
         if self._sensor_stale_duration:
-            async_track_time_interval(
-                self.hass,
-                self._async_check_sensor_not_responding,
-                self._sensor_stale_duration,
+            self.async_on_remove(
+                async_track_time_interval(
+                    self.hass,
+                    self._async_check_sensor_not_responding,
+                    self._sensor_stale_duration,
+                )
             )
 
         if self._keep_alive:
@@ -511,7 +514,10 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
 
         sensor_state = self.hass.states.get(self._sensor_entity_id)
 
-        if sensor_state.last_updated < now - self._sensor_stale_duration:
+        if (
+            datetime.datetime.now(datetime.timezone.utc) - sensor_state.last_updated
+            > self._sensor_stale_duration
+        ):
             _LOGGER.debug("Time is %s, last changed is %s, stale duration is %s")
             _LOGGER.warning("Sensor is stalled, call the emergency stop")
             await self._activate_emergency_stop()
