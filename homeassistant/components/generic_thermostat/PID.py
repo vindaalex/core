@@ -3,6 +3,7 @@ import logging
 from time import time
 from collections import deque, namedtuple
 
+_LOGGER = logging.getLogger(__name__)
 
 # Based on Arduino PID Library
 # See https://github.com/br3ttb/Arduino-PID-Library
@@ -19,25 +20,32 @@ class PIDController(object):
         time (function): A function which returns the current time in seconds.
     """
 
-    def __init__(self, sampletime, kp, ki, kd, out_min=float('-inf'),
-                 out_max=float('inf'), time=time):
+    def __init__(
+        self,
+        sampletime,
+        kp,
+        ki,
+        kd,
+        out_min=float("-inf"),
+        out_max=float("inf"),
+        time=time,
+    ):
         if kp is None:
-            raise ValueError('kp must be specified')
+            raise ValueError("kp must be specified")
         if ki is None:
-            raise ValueError('ki must be specified')
+            raise ValueError("ki must be specified")
         if kd is None:
-            raise ValueError('kd must be specified')
+            raise ValueError("kd must be specified")
         if sampletime <= 0:
-            raise ValueError('sampletime must be greater than 0')
+            raise ValueError("sampletime must be greater than 0")
         if out_min >= out_max:
-            raise ValueError('out_min must be less than out_max')
+            raise ValueError("out_min must be less than out_max")
 
-        self._logger = logging.getLogger(type(self).__name__)
-        #self._logger = logging.getLogger(logname)
+        # _LOGGER = logging.getLogger(logname)
         self._Kp = kp
-        self._Ki = ki 
-        self._Kd = kd 
-        self._logger.debug('_sampletime: {0}'.format(sampletime))
+        self._Ki = ki
+        self._Kd = kd
+        _LOGGER.debug("_sampletime: {0}".format(sampletime))
         self._sampletime = sampletime * 1000
         self._out_min = out_min
         self._out_max = out_max
@@ -62,33 +70,42 @@ class PIDController(object):
             A value between `out_min` and `out_max`.
         """
         now = self._time() * 1000
-        # self._logger.debug('pid timestamp: {0}'.format(self._last_calc_timestamp))
+        # _LOGGER.debug('pid timestamp: {0}'.format(self._last_calc_timestamp))
         if self._last_calc_timestamp != 0:
-            # self._logger.debug('pid timediff: now {0} - last {0} < sampletime {0}'.format(now,self._last_calc_timestamp,self._sampletime))
+            # _LOGGER.debug('pid timediff: now {0} - last {0} < sampletime {0}'.format(now,self._last_calc_timestamp,self._sampletime))
             if (now - self._last_calc_timestamp) < self._sampletime:
+                _LOGGER.info(
+                    "pid timediff: {0} < sampletime {1}: keep previous value".format(
+                        round((now - self._last_calc_timestamp)/1000, 0), self._sampletime/1000
+                    )
+                )
                 return self._last_output
 
         # Compute all the working error variables
         error = setpoint - input_val
         input_diff = input_val - self._last_input
-        
+
         if self._last_calc_timestamp != 0:
-            time_diff = (now - self._last_calc_timestamp)/1000
-        
+            time_diff = (now - self._last_calc_timestamp) / 1000
+
         # In order to prevent windup, only integrate if the process is not saturated
-        #if self._last_output < self._out_max and self._last_output > self._out_min:
+        # if self._last_output < self._out_max and self._last_output > self._out_min:
         if self._last_calc_timestamp != 0:
             self._integral += time_diff * error
-            self._integral = min(self._integral, self._out_max / (self._windupguard * self._Ki))
-            self._integral = max(self._integral, self._out_min / (self._windupguard * self._Ki))
-        
-            self._differential = ((self._diff_mov_avg - 1) * self._last_diff + input_diff / time_diff ) / self._diff_mov_avg
-        
+            self._integral = min(
+                self._integral, self._out_max / (self._windupguard * self._Ki)
+            )
+            self._integral = max(
+                self._integral, self._out_min / (self._windupguard * self._Ki)
+            )
+
+            self._differential = (
+                (self._diff_mov_avg - 1) * self._last_diff + input_diff / time_diff
+            ) / self._diff_mov_avg
+
         p = self._Kp * error
         i = self._Ki * self._integral
         d = -(self._Kd * self._differential)
-
-
 
         # Compute PID Output
         self._last_output = p + i + d
@@ -96,17 +113,17 @@ class PIDController(object):
         self._last_output = max(self._last_output, self._out_min)
 
         # Log some debug info
-        self._logger.debug('P: {0}'.format(p))
-        self._logger.debug('I: {0}'.format(i))
-        self._logger.debug('D: {0}'.format(d))
-        self._logger.debug('output: {0}'.format(self._last_output))
+        _LOGGER.debug("P: {0}".format(p))
+        _LOGGER.debug("I: {0}".format(i))
+        _LOGGER.debug("D: {0}".format(d))
+        _LOGGER.debug("output: {0}".format(self._last_output))
 
         # Remember some variables for next time
         self._last_input = input_val
         self._last_diff = self._differential
         self._last_calc_timestamp = now
         return self._last_output
-    
+
     def reset_time(self):
         self._last_calc_timestamp = self._time() * 1000
 
@@ -128,41 +145,51 @@ class PIDAutotune(object):
             overshoot/undershoot the setpoint before the state changes.
         time (function): A function which returns the current time in seconds.
     """
-    PIDParams = namedtuple('PIDParams', ['Kp', 'Ki', 'Kd'])
 
-    PEAK_AMPLITUDE_TOLERANCE = 0.05 #or 1.03?
-    STATE_OFF = 'off'
-    STATE_RELAY_STEP_UP = 'relay step up'
-    STATE_RELAY_STEP_DOWN = 'relay step down'
-    STATE_SUCCEEDED = 'succeeded'
-    STATE_FAILED = 'failed'
+    PIDParams = namedtuple("PIDParams", ["Kp", "Ki", "Kd"])
+
+    PEAK_AMPLITUDE_TOLERANCE = 0.05  # or 1.03?
+    STATE_OFF = "off"
+    STATE_RELAY_STEP_UP = "relay step up"
+    STATE_RELAY_STEP_DOWN = "relay step down"
+    STATE_SUCCEEDED = "succeeded"
+    STATE_FAILED = "failed"
 
     _tuning_rules = {
         # rule: [Kp_divisor, Ki_divisor, Kd_divisor]
         "ziegler-nichols": [34, 40, 160],
-        "tyreus-luyben": [44,  9, 126],
+        "tyreus-luyben": [44, 9, 126],
         "ciancone-marlin": [66, 88, 162],
         "pessen-integral": [28, 50, 133],
-        "some-overshoot": [60, 40,  60],
-        "no-overshoot": [100, 40,  60],
-        "brewing": [2.5, 6, 380]
+        "some-overshoot": [60, 40, 60],
+        "no-overshoot": [100, 40, 60],
+        "brewing": [2.5, 6, 380],
     }
 
-    def __init__(self, setpoint, out_step=10, sampletime=5, lookback=60,
-                 out_min=float('-inf'), out_max=float('inf'), noiseband=0.5, time=time):
+    def __init__(
+        self,
+        setpoint,
+        out_step=10,
+        sampletime=5,
+        lookback=60,
+        out_min=float("-inf"),
+        out_max=float("inf"),
+        noiseband=0.5,
+        time=time,
+    ):
         if setpoint is None:
-            raise ValueError('setpoint must be specified')
+            raise ValueError("setpoint must be specified")
         if out_step < 1:
-            raise ValueError('out_step must be greater or equal to 1')
+            raise ValueError("out_step must be greater or equal to 1")
         if sampletime < 1:
-            raise ValueError('sampletime must be greater or equal to 1')
+            raise ValueError("sampletime must be greater or equal to 1")
         if lookback < sampletime:
-            raise ValueError('lookback must be greater or equal to sampletime')
+            raise ValueError("lookback must be greater or equal to sampletime")
         if out_min >= out_max:
-            raise ValueError('out_min must be less than out_max')
+            raise ValueError("out_min must be less than out_max")
 
         self._time = time
-        self._logger = logging.getLogger(type(self).__name__)
+        _LOGGER = logging.getLogger(type(self).__name__)
         self._inputs = deque(maxlen=round(lookback / sampletime))
         self._sampletime = sampletime * 1000
         self._setpoint = setpoint
@@ -184,7 +211,7 @@ class PIDAutotune(object):
         self._consolidating_max = 0
         self._consolidating_min = 0
         self._consolidating_max_timestamp = 0
-        self._consolidating_min_timestamp = 0             
+        self._consolidating_min_timestamp = 0
 
     @property
     def state(self):
@@ -201,96 +228,101 @@ class PIDAutotune(object):
         """Get a list of all available tuning rules."""
         return self._tuning_rules.keys()
 
-    def get_pid_parameters(self, tuning_rule='ziegler-nichols', use_tuning_rules=True, autotune_control_type='classic_pid'):
+    def get_pid_parameters(
+        self,
+        tuning_rule="ziegler-nichols",
+        use_tuning_rules=True,
+        autotune_control_type="classic_pid",
+    ):
         """Get PID parameters.
 
         Args:
             tuning_rule (str): Sets the rule which should be used to calculate
                 the parameters.
-            use_tuning_rules (boolean): Set to true to use the tuning rules and 
+            use_tuning_rules (boolean): Set to true to use the tuning rules and
                 false to use Ziegler–Nichols' method.
             autotune_control_type (str): Sets the Ziegler Nichols control type
                 according to:
                 https://en.wikipedia.org/wiki/Ziegler%E2%80%93Nichols_method
-                Values: p, pi, pd, classic_pid, pessen_integral_rule, 
+                Values: p, pi, pd, classic_pid, pessen_integral_rule,
                     some_overshoot, no_overshoot
 
         """
-        
+
         # https://en.wikipedia.org/wiki/Ziegler%E2%80%93Nichols_method
-        self._logger.debug('Ultimate gain:')
-        self._logger.debug('Ku value: {0}'.format(self._Ku))
-        self._logger.debug('Oscilation period:')
-        self._logger.debug('Pu value: {0}'.format(self._Pu))
-        
-        self._logger.debug('Ziegler–Nichols P control type:')
+        _LOGGER.debug("Ultimate gain:")
+        _LOGGER.debug("Ku value: {0}".format(self._Ku))
+        _LOGGER.debug("Oscilation period:")
+        _LOGGER.debug("Pu value: {0}".format(self._Pu))
+
+        _LOGGER.debug("Ziegler–Nichols P control type:")
         kp = 0.5 * self._Ku
         ki = kd = 0
-        self._logger.debug('Kp value: {0}'.format(kp))
+        _LOGGER.debug("Kp value: {0}".format(kp))
 
-        self._logger.debug('Ziegler–Nichols PI control type:')
+        _LOGGER.debug("Ziegler–Nichols PI control type:")
         kp = 0.45 * self._Ku
         ti = self._Pu / 1.2
         ki = 0.54 * self._Ku / self._Pu
-        self._logger.debug('Kp value: {0}'.format(kp))
-        self._logger.debug('Ti value: {0}'.format(ti))
-        self._logger.debug('Ki value: {0}'.format(ki))
+        _LOGGER.debug("Kp value: {0}".format(kp))
+        _LOGGER.debug("Ti value: {0}".format(ti))
+        _LOGGER.debug("Ki value: {0}".format(ki))
 
-        self._logger.debug('Ziegler–Nichols PD control type:')
+        _LOGGER.debug("Ziegler–Nichols PD control type:")
         kp = 0.8 * self._Ku
         td = self._Pu / 8
         kd = self._Ku * self._Pu / 10
-        self._logger.debug('Kp value: {0}'.format(kp))
-        self._logger.debug('Td value: {0}'.format(td))
-        self._logger.debug('Kd value: {0}'.format(kd))        
+        _LOGGER.debug("Kp value: {0}".format(kp))
+        _LOGGER.debug("Td value: {0}".format(td))
+        _LOGGER.debug("Kd value: {0}".format(kd))
 
-        self._logger.debug('Ziegler–Nichols classic PID control type:')
+        _LOGGER.debug("Ziegler–Nichols classic PID control type:")
         kp = 0.6 * self._Ku
         ti = self._Pu / 2
         td = self._Pu / 8
         ki = 1.2 * self._Ku / self._Pu
         kd = 3 * self._Ku * self._Pu / 40
-        self._logger.debug('Kp value: {0}'.format(kp))
-        self._logger.debug('Ti value: {0}'.format(ti))
-        self._logger.debug('Td value: {0}'.format(td))
-        self._logger.debug('Ki value: {0}'.format(ki))
-        self._logger.debug('Kd value: {0}'.format(kd))
+        _LOGGER.debug("Kp value: {0}".format(kp))
+        _LOGGER.debug("Ti value: {0}".format(ti))
+        _LOGGER.debug("Td value: {0}".format(td))
+        _LOGGER.debug("Ki value: {0}".format(ki))
+        _LOGGER.debug("Kd value: {0}".format(kd))
 
-        self._logger.debug('Ziegler–Nichols Pessen Integral Rule control type:')
+        _LOGGER.debug("Ziegler–Nichols Pessen Integral Rule control type:")
         kp = 7 * self._Ku / 10
         ti = 2 * self._Pu / 5
         td = 3 * self._Pu / 20
         ki = 1.75 * self._Ku / self._Pu
         kd = 21 * self._Ku * self._Pu / 200
-        self._logger.debug('Kp value: {0}'.format(kp))
-        self._logger.debug('Ti value: {0}'.format(ti))
-        self._logger.debug('Td value: {0}'.format(td))
-        self._logger.debug('Ki value: {0}'.format(ki))
-        self._logger.debug('Kd value: {0}'.format(kd))        
+        _LOGGER.debug("Kp value: {0}".format(kp))
+        _LOGGER.debug("Ti value: {0}".format(ti))
+        _LOGGER.debug("Td value: {0}".format(td))
+        _LOGGER.debug("Ki value: {0}".format(ki))
+        _LOGGER.debug("Kd value: {0}".format(kd))
 
-        self._logger.debug('Ziegler–Nichols Some overshoot control type:')
+        _LOGGER.debug("Ziegler–Nichols Some overshoot control type:")
         kp = self._Ku / 3
         ti = self._Pu / 2
         td = self._Pu / 3
         ki = 0.666 * self._Ku / self._Pu
         kd = self._Ku * self._Pu / 9
-        self._logger.debug('Kp value: {0}'.format(kp))
-        self._logger.debug('Ti value: {0}'.format(ti))
-        self._logger.debug('Td value: {0}'.format(td))
-        self._logger.debug('Ki value: {0}'.format(ki))
-        self._logger.debug('Kd value: {0}'.format(kd)) 
+        _LOGGER.debug("Kp value: {0}".format(kp))
+        _LOGGER.debug("Ti value: {0}".format(ti))
+        _LOGGER.debug("Td value: {0}".format(td))
+        _LOGGER.debug("Ki value: {0}".format(ki))
+        _LOGGER.debug("Kd value: {0}".format(kd))
 
-        self._logger.debug('Ziegler–Nichols No overshoot control type:')
+        _LOGGER.debug("Ziegler–Nichols No overshoot control type:")
         kp = self._Ku / 5
         ti = self._Pu / 2
         td = self._Pu / 3
-        ki = (2/5) * self._Ku / self._Pu
+        ki = (2 / 5) * self._Ku / self._Pu
         kd = self._Ku * self._Pu / 15
-        self._logger.debug('Kp value: {0}'.format(kp))
-        self._logger.debug('Ti value: {0}'.format(ti))
-        self._logger.debug('Td value: {0}'.format(td))
-        self._logger.debug('Ki value: {0}'.format(ki))
-        self._logger.debug('Kd value: {0}'.format(kd))
+        _LOGGER.debug("Kp value: {0}".format(kp))
+        _LOGGER.debug("Ti value: {0}".format(ti))
+        _LOGGER.debug("Td value: {0}".format(td))
+        _LOGGER.debug("Ki value: {0}".format(ki))
+        _LOGGER.debug("Kd value: {0}".format(kd))
 
         if use_tuning_rules == True:
             divisors = self._tuning_rules[tuning_rule]
@@ -299,38 +331,38 @@ class PIDAutotune(object):
             kd = kp * (self._Pu / divisors[2])
             return PIDAutotune.PIDParams(kp, ki, kd)
         elif use_tuning_rules == False:
-            if autotune_control_type == 'p':
-                kp = 0.5*self._Ku
+            if autotune_control_type == "p":
+                kp = 0.5 * self._Ku
                 ki = kd = 0
                 return PIDAutotune.PIDParams(kp, ki, kd)
-            elif autotune_control_type == 'pi':
+            elif autotune_control_type == "pi":
                 kp = 0.45 * self._Ku
                 ki = 0.54 * self._Ku / self._Pu
-                kd = 0             
+                kd = 0
                 return PIDAutotune.PIDParams(kp, ki, kd)
-            elif autotune_control_type == 'pd':
+            elif autotune_control_type == "pd":
                 kp = 0.8 * self._Ku
                 ki = 0
-                kd = self._Ku * self._Pu / 10           
+                kd = self._Ku * self._Pu / 10
                 return PIDAutotune.PIDParams(kp, ki, kd)
-            elif autotune_control_type == 'classic_pid':
+            elif autotune_control_type == "classic_pid":
                 kp = 0.6 * self._Ku
                 ki = 1.2 * self._Ku / self._Pu
-                kd = 3 * self._Ku * self._Pu / 40         
+                kd = 3 * self._Ku * self._Pu / 40
                 return PIDAutotune.PIDParams(kp, ki, kd)
-            elif autotune_control_type == 'pessen_integral_rule':
+            elif autotune_control_type == "pessen_integral_rule":
                 kp = 7 * self._Ku / 10
                 ki = 1.75 * self._Ku / self._Pu
-                kd = 21 * self._Ku * self._Pu / 200   
+                kd = 21 * self._Ku * self._Pu / 200
                 return PIDAutotune.PIDParams(kp, ki, kd)
-            elif autotune_control_type == 'some_overshoot':
+            elif autotune_control_type == "some_overshoot":
                 kp = self._Ku / 3
                 ki = 0.666 * self._Ku / self._Pu
-                kd = self._Ku * self._Pu / 9  
+                kd = self._Ku * self._Pu / 9
                 return PIDAutotune.PIDParams(kp, ki, kd)
-            elif autotune_control_type == 'no_overshoot':
+            elif autotune_control_type == "no_overshoot":
                 kp = self._Ku / 5
-                ki = (2/5) * self._Ku / self._Pu
+                ki = (2 / 5) * self._Ku / self._Pu
                 kd = self._Ku * self._Pu / 15
                 return PIDAutotune.PIDParams(kp, ki, kd)
 
@@ -348,9 +380,11 @@ class PIDAutotune(object):
         """
         now = self._time() * 1000
 
-        if (self._state == PIDAutotune.STATE_OFF
-                or self._state == PIDAutotune.STATE_SUCCEEDED
-                or self._state == PIDAutotune.STATE_FAILED):
+        if (
+            self._state == PIDAutotune.STATE_OFF
+            or self._state == PIDAutotune.STATE_SUCCEEDED
+            or self._state == PIDAutotune.STATE_FAILED
+        ):
             self._initTuner(input_val, now)
         elif (now - self._last_run_timestamp) < self._sampletime:
             return False
@@ -358,19 +392,23 @@ class PIDAutotune(object):
         self._last_run_timestamp = now
 
         # check input and change relay state if necessary
-        if (self._state == PIDAutotune.STATE_RELAY_STEP_UP
-                and input_val > self._setpoint + self._noiseband):
+        if (
+            self._state == PIDAutotune.STATE_RELAY_STEP_UP
+            and input_val > self._setpoint + self._noiseband
+        ):
             self._state = PIDAutotune.STATE_RELAY_STEP_DOWN
-            self._logger.debug('switched state: {0}'.format(self._state))
-            self._logger.debug('input: {0}'.format(input_val))
-        elif (self._state == PIDAutotune.STATE_RELAY_STEP_DOWN
-                and input_val < self._setpoint - self._noiseband):
+            _LOGGER.debug("switched state: {0}".format(self._state))
+            _LOGGER.debug("input: {0}".format(input_val))
+        elif (
+            self._state == PIDAutotune.STATE_RELAY_STEP_DOWN
+            and input_val < self._setpoint - self._noiseband
+        ):
             self._state = PIDAutotune.STATE_RELAY_STEP_UP
-            self._logger.debug('switched state: {0}'.format(self._state))
-            self._logger.debug('input: {0}'.format(input_val))
+            _LOGGER.debug("switched state: {0}".format(self._state))
+            _LOGGER.debug("input: {0}".format(input_val))
 
         # set output
-        if (self._state == PIDAutotune.STATE_RELAY_STEP_UP):
+        if self._state == PIDAutotune.STATE_RELAY_STEP_UP:
             self._output = self._initial_output + self._outputstep
         elif self._state == PIDAutotune.STATE_RELAY_STEP_DOWN:
             self._output = self._initial_output - self._outputstep
@@ -387,7 +425,7 @@ class PIDAutotune(object):
             is_max = is_max and (input_val >= val)
             is_min = is_min and (input_val <= val)
 
-        if is_max:            
+        if is_max:
             self._consolidating_max = input_val
             self._consolidating_max_timestamp = now
         elif is_min:
@@ -429,9 +467,9 @@ class PIDAutotune(object):
 
             self._peaks.append(consolidated_peak)
             self._peak_timestamps.append(consolidated_timestamp)
-            self._logger.debug('found peak: {0}'.format(consolidated_peak))
-            self._logger.debug('timestamp: {0}'.format(consolidated_timestamp))
-            self._logger.debug('peak count: {0}'.format(self._peak_count))
+            _LOGGER.debug("found peak: {0}".format(consolidated_peak))
+            _LOGGER.debug("timestamp: {0}".format(consolidated_timestamp))
+            _LOGGER.debug("peak count: {0}".format(self._peak_count))
             self._consolidating_max = 0
             self._consolidating_min = 0
             self._consolidating_max_timestamp = 0
@@ -443,7 +481,7 @@ class PIDAutotune(object):
 
         if inflection and (self._peak_count > 4):
             for i in range(0, len(self._peaks) - 2):
-                self._induced_amplitude += abs(self._peaks[i] - self._peaks[i+1])
+                self._induced_amplitude += abs(self._peaks[i] - self._peaks[i + 1])
 
             self._induced_amplitude /= 3.0
 
@@ -452,13 +490,13 @@ class PIDAutotune(object):
                 abs_min = min(self._peaks[1], self._peaks[3])
             else:
                 abs_max = max(self._peaks[1], self._peaks[3])
-                abs_min = min(self._peaks[0], self._peaks[2])            
+                abs_min = min(self._peaks[0], self._peaks[2])
 
             # check convergence criterion for amplitude of induced oscillation
             amplitude_dev = (abs_max - abs_min) / self._induced_amplitude
 
-            self._logger.debug('amplitude: {0}'.format(self._induced_amplitude))
-            self._logger.debug('amplitude deviation: {0}'.format(amplitude_dev))
+            _LOGGER.debug("amplitude: {0}".format(self._induced_amplitude))
+            _LOGGER.debug("amplitude deviation: {0}".format(amplitude_dev))
 
             if amplitude_dev < PIDAutotune.PEAK_AMPLITUDE_TOLERANCE:
                 self._state = PIDAutotune.STATE_SUCCEEDED
@@ -474,7 +512,12 @@ class PIDAutotune(object):
             self._output = 0
 
             # calculate ultimate gain
-            self._Ku = 4.0 * self._outputstep / math.pi / math.sqrt(self._induced_amplitude ** 2 - self._noiseband ** 2) 
+            self._Ku = (
+                4.0
+                * self._outputstep
+                / math.pi
+                / math.sqrt(self._induced_amplitude ** 2 - self._noiseband ** 2)
+            )
 
             # calculate ultimate period in seconds
             period1 = self._peak_timestamps[3] - self._peak_timestamps[1]
