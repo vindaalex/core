@@ -56,11 +56,14 @@ CONF_KP = "kp"
 CONF_KI = "ki"
 CONF_KD = "kd"
 CONF_PWM = "pwm"
+
 CONF_AUTOTUNE = "autotune"
-CONF_NOISEBAND = "noiseband"
-CONF_HEAT_METER = "heat_meter"
-CONF_AUTOTUNE_LOOKBACK = "autotune_lookback"
 CONF_AUTOTUNE_CONTROL_TYPE = "autotune_control_type"
+CONF_NOISEBAND = "noiseband"
+CONF_AUTOTUNE_LOOKBACK = "autotune_lookback"
+CONF_AUTOTUNE_STEP_SIZE = "tune_step_size"
+
+CONF_HEAT_METER = "heat_meter"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +75,7 @@ class HVAC_Setting:
         self.mode = mode
         self._hvac_settings = conf
 
-        self.target_temp = self._hvac_settings[CONF_HVAC_MODE_INIT_TEMP]
+        self.target_temperature = self._hvac_settings[CONF_HVAC_MODE_INIT_TEMP]
         self.min_target_temp = self._hvac_settings[CONF_HVAC_MODE_MIN_TEMP]
         self.max_target_temp = self._hvac_settings[CONF_HVAC_MODE_MAX_TEMP]
         self.away_temp = self._hvac_settings[CONF_AWAY_TEMP]
@@ -86,8 +89,11 @@ class HVAC_Setting:
 
         self.pidAutotune = None
         self.pidController = None
+        self.current_temperature = None
+        self._autotune_state = False
 
         if self.is_hvac_pwm_mode:
+            self.check_heat_meter
             self.start_pid()
         if self.is_hvac_on_off_mode:
             self.start_on_off()
@@ -99,40 +105,54 @@ class HVAC_Setting:
         except:
             self._pwm[CONF_KEEP_ALIVE] = None
 
-    def start_pid(self):
-        _LOGGER.debug("Init pwm settings for mode : %s", self.mode)
-        difference = self._pwm[CONF_DIFFERENCE]
-        kp, ki, kd = self.get_pid_param
-        min_cycle_duration = self._pwm[CONF_PID_REFRESH_INTERVAL]
-        autotune = self._pwm[CONF_AUTOTUNE]
-        noiseband = self._pwm[CONF_NOISEBAND]
-        autotune_lookback = self._pwm[CONF_AUTOTUNE_LOOKBACK]
-        min_level, max_level = self.get_pid_limits
-
+    @property
+    def check_heat_meter(self):
         try:
             self._pwm[CONF_HEAT_METER]
         except:
             self._pwm[CONF_HEAT_METER] = None
 
-        if autotune != "none":
-            self.pidAutotune = pid_controller.PIDAutotune(
-                self.target_temp,
-                difference,
-                min_cycle_duration.seconds,
-                autotune_lookback.seconds,
-                min_level,
-                max_level,
-                noiseband,
-                time.time,
-            )
-            _LOGGER.warning(
-                "Autotune will run with the current Setpoint Value you set. "
-                "Changes, submited after, doesn't have any effect until it's finished."
-            )
-        else:
-            self.pidController = pid_controller.PIDController(
-                min_cycle_duration.seconds, kp, ki, kd, 0, difference, time.time
-            )
+    def start_pid(self):
+        _LOGGER.debug("Init pwm settings for mode : %s", self.mode)
+        self._autotune_state = False
+        self.pidAutotune = None
+
+        difference = self._pwm[CONF_DIFFERENCE]
+        kp, ki, kd = self.get_pid_param
+        min_cycle_duration = self._pwm[CONF_PID_REFRESH_INTERVAL]
+
+        self.pidController = pid_controller.PIDController(
+            min_cycle_duration.seconds, kp, ki, kd, 0, difference, time.time
+        )
+
+        self.control_output = 0
+
+    def start_autotune(self, target_temp):
+        _LOGGER.debug("Init autotune settings for mode : %s", self.mode)
+        self.target_temperature = target_temp
+        self._autotune_state = True
+        self.pidController = None
+
+        difference = self._pwm[CONF_DIFFERENCE]
+        min_cycle_duration = self._pwm[CONF_PID_REFRESH_INTERVAL]
+        step_size = self._pwm[CONF_AUTOTUNE_STEP_SIZE]
+        noiseband = self._pwm[CONF_NOISEBAND]
+        autotune_lookback = self._pwm[CONF_AUTOTUNE_LOOKBACK]
+        min_level, max_level = self.get_pid_limits
+        self.pidAutotune = pid_controller.PIDAutotune(
+            self.target_temperature,
+            step_size,
+            min_cycle_duration.seconds,
+            autotune_lookback.seconds,
+            min_level,
+            max_level,
+            noiseband,
+            time.time,
+        )
+        _LOGGER.warning(
+            "Autotune will run with the current Setpoint Value you set. "
+            "Changes, submited after, doesn't have any effect until it's finished."
+        )
 
         self.control_output = 0
 
@@ -143,17 +163,20 @@ class HVAC_Setting:
         elif self.pidController:
             self.pidController.reset_time()
 
-    def run_pid(self, current_temperature):
+    def run_pid(self, current, target, force=False):
         autotune = self._pwm[CONF_AUTOTUNE]
-        if autotune != "none":
+        self.current_temperature = current
+        self.target_temperature = target
 
+        if self._autotune_state:
+            _LOGGER.debug("Autotune mode")
             autotune_control_type = self._pwm[CONF_AUTOTUNE_CONTROL_TYPE]
 
             cycle_time = self._pwm[CONF_PID_REFRESH_INTERVAL]
             self._pwm[CONF_DIFFERENCE]
             min_level, max_level = self.get_pid_limits
 
-            if self.pidAutotune.run(current_temperature):
+            if self.pidAutotune.run(self.current_temperature):
                 if autotune_control_type == "none":
                     params = self.pidAutotune.get_pid_parameters(autotune, True)
                 else:
@@ -183,12 +206,12 @@ class HVAC_Setting:
                     max_level,
                     time.time,
                 )
-                self._pwm[CONF_AUTOTUNE] = "none"
+                self._autotune_state = False
 
             self.control_output = self.pidAutotune.output
         else:
             self.control_output = self.pidController.calc(
-                current_temperature, self.target_temperature
+                self.current_temperature, self.target_temperature, force
             )
         if self.mode == HVAC_MODE_COOL:
             self.control_output *= -1
@@ -204,6 +227,13 @@ class HVAC_Setting:
             max_level = 0
 
         return [min_level, max_level]
+
+    @property
+    def get_variable_attr(self):
+        tmp_dict = {}
+        tmp_dict["target"] = self.get_target_temp
+
+        return tmp_dict
 
     @property
     def get_pid_param(self):
@@ -226,6 +256,23 @@ class HVAC_Setting:
     def get_pid_control_output(self):
         """Return the pid control output of the thermostat."""
         return self.control_output
+
+    @property
+    def is_pwm_autotune(self):
+        """Return if pid autotune is included."""
+        autotune = self._pwm[CONF_AUTOTUNE]
+        if autotune != "none":
+            return True
+        else:
+            return False
+
+    @property
+    def is_pwm_autotune_active(self):
+        """Return if pid autotune is running."""
+        if self._autotune_state:
+            return True
+        else:
+            return False
 
     @property
     def is_hvac_pwm_mode(self):
@@ -300,10 +347,13 @@ class HVAC_Setting:
 
     @property
     def get_target_temp(self):
-        return self.target_temp
+        return self.target_temperature
 
     def set_target_temperature(self, target_temp):
         self.target_temperature = target_temp
+
+    def set_current_temperature(self, current_temp):
+        self.current_temperature = current_temp
 
     @property
     def get_target_temp_limits(self):

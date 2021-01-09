@@ -46,7 +46,7 @@ class PIDController(object):
         self._Ki = ki
         self._Kd = kd
         _LOGGER.debug("_sampletime: {0}".format(sampletime))
-        self._sampletime = sampletime * 1000
+        self._sampletime = sampletime
         self._out_min = out_min
         self._out_max = out_max
         self._integral = 0
@@ -59,7 +59,7 @@ class PIDController(object):
         self._last_calc_timestamp = 0
         self._time = time
 
-    def calc(self, input_val, setpoint):
+    def calc(self, input_val, setpoint, force=False):
         """Adjusts and holds the given setpoint.
 
         Args:
@@ -69,14 +69,15 @@ class PIDController(object):
         Returns:
             A value between `out_min` and `out_max`.
         """
-        now = self._time() * 1000
+        now = self._time()
         # _LOGGER.debug('pid timestamp: {0}'.format(self._last_calc_timestamp))
         if self._last_calc_timestamp != 0:
             # _LOGGER.debug('pid timediff: now {0} - last {0} < sampletime {0}'.format(now,self._last_calc_timestamp,self._sampletime))
-            if (now - self._last_calc_timestamp) < self._sampletime:
+            if (now - self._last_calc_timestamp) < self._sampletime and not force:
                 _LOGGER.info(
                     "pid timediff: {0} < sampletime {1}: keep previous value".format(
-                        round((now - self._last_calc_timestamp)/1000, 0), self._sampletime/1000
+                        round((now - self._last_calc_timestamp), 0),
+                        self._sampletime,
                     )
                 )
                 return self._last_output
@@ -86,7 +87,7 @@ class PIDController(object):
         input_diff = input_val - self._last_input
 
         if self._last_calc_timestamp != 0:
-            time_diff = (now - self._last_calc_timestamp) / 1000
+            time_diff = now - self._last_calc_timestamp
 
         # In order to prevent windup, only integrate if the process is not saturated
         # if self._last_output < self._out_max and self._last_output > self._out_min:
@@ -125,7 +126,7 @@ class PIDController(object):
         return self._last_output
 
     def reset_time(self):
-        self._last_calc_timestamp = self._time() * 1000
+        self._last_calc_timestamp = self._time()
 
 
 # Based on a fork of Arduino PID AutoTune Library
@@ -189,9 +190,9 @@ class PIDAutotune(object):
             raise ValueError("out_min must be less than out_max")
 
         self._time = time
-        _LOGGER = logging.getLogger(type(self).__name__)
+        # _LOGGER = logging.getLogger(type(self).__name__)
         self._inputs = deque(maxlen=round(lookback / sampletime))
-        self._sampletime = sampletime * 1000
+        self._sampletime = sampletime
         self._setpoint = setpoint
         self._outputstep = out_step
         self._noiseband = noiseband
@@ -367,7 +368,7 @@ class PIDAutotune(object):
                 return PIDAutotune.PIDParams(kp, ki, kd)
 
     def reset_time(self):
-        self._last_calc_timestamp = self._time() * 1000
+        self._last_calc_timestamp = self._time()
 
     def run(self, input_val):
         """To autotune a system, this method must be called periodically.
@@ -378,7 +379,7 @@ class PIDAutotune(object):
         Returns:
             `true` if tuning is finished, otherwise `false`.
         """
-        now = self._time() * 1000
+        now = self._time()
 
         if (
             self._state == PIDAutotune.STATE_OFF
@@ -522,7 +523,7 @@ class PIDAutotune(object):
             # calculate ultimate period in seconds
             period1 = self._peak_timestamps[3] - self._peak_timestamps[1]
             period2 = self._peak_timestamps[4] - self._peak_timestamps[2]
-            self._Pu = 0.5 * (period1 + period2) / 1000.0
+            self._Pu = 0.5 * (period1 + period2)
             return True
         return False
 
