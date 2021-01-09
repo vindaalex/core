@@ -232,6 +232,9 @@ class HVAC_Setting:
     def get_variable_attr(self):
         tmp_dict = {}
         tmp_dict["target"] = self.get_target_temp
+        if self.is_hvac_pwm_mode:
+
+            tmp_dict["PID_values"] = self.get_pid_param
 
         return tmp_dict
 
