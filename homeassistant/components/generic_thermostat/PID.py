@@ -26,6 +26,7 @@ class PIDController(object):
         kp,
         ki,
         kd,
+        wc,
         out_min=float("-inf"),
         out_max=float("inf"),
         time=time,
@@ -50,6 +51,8 @@ class PIDController(object):
         self._out_min = out_min
         self._out_max = out_max
         self._integral = 0
+        self._integral_pid = 0
+        self._integral_wc = 0
         self._differential = 0
         self._windupguard = 1
         self._diff_mov_avg = 60
@@ -58,8 +61,9 @@ class PIDController(object):
         self._last_output = 0
         self._last_calc_timestamp = 0
         self._time = time
+        self.wc_KA, self.wc_KB = wc
 
-    def calc(self, input_val, setpoint, force=False):
+    def calc(self, input_val, setpoint, out_temp, force=False):
         """Adjusts and holds the given setpoint.
 
         Args:
@@ -89,15 +93,21 @@ class PIDController(object):
         if self._last_calc_timestamp != 0:
             time_diff = now - self._last_calc_timestamp
 
+        if self.wc_KA:
+            temp_diff = setpoint - out_temp
+            self.integral_wc = temp_diff * self.wc_KA + self.wc_KB
+
         # In order to prevent windup, only integrate if the process is not saturated
         # if self._last_output < self._out_max and self._last_output > self._out_min:
         if self._last_calc_timestamp != 0:
-            self._integral += time_diff * error
+            self._integral_pid += time_diff * error
             self._integral = min(
-                self._integral, self._out_max / (self._windupguard * self._Ki)
+                self._integral_pid + self.integral_wc,
+                self._out_max / (self._windupguard * self._Ki),
             )
             self._integral = max(
-                self._integral, self._out_min / (self._windupguard * self._Ki)
+                self._integral_pid + self.integral_wc,
+                self._out_min / (self._windupguard * self._Ki),
             )
 
             self._differential = (

@@ -36,6 +36,7 @@ from homeassistant.const import (
     ATTR_TEMPERATURE,
     CONF_ENTITY_ID,
     CONF_NAME,
+    CONF_UNIQUE_ID,
     EVENT_HOMEASSISTANT_START,
     PRECISION_HALVES,
     PRECISION_TENTHS,
@@ -60,6 +61,7 @@ from homeassistant.helpers.event import (
 # )
 from homeassistant.helpers.reload import async_setup_reload_service
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import slugify
 
 from . import DOMAIN, PLATFORMS
 
@@ -128,16 +130,19 @@ CONF_AUTOTUNE_CONTROL_TYPE = "autotune_control_type"
 CONF_NOISEBAND = "noiseband"
 CONF_AUTOTUNE_LOOKBACK = "autotune_lookback"
 CONF_AUTOTUNE_STEP_SIZE = "tune_step_size"
-
 CONF_HEAT_METER = "heat_meter"
-
-
 PRESET_AUTOTUNE = "PID_autotune"
 
 # valve control (pid/pwm)
 SERVICE_SET_VALUE = "set_value"
 ATTR_VALUE = "value"
 PLATFORM_INPUT_NUMBER = "input_number"
+
+# weather compensating mode
+CONF_WC_MODE = "WC_mode"
+CONF_SENSOR_OUT = "sensor_out"
+CONF_KA = "ka"
+CONF_KB = "kb"
 
 SUPPORT_FLAGS = SUPPORT_TARGET_TEMPERATURE
 
@@ -227,6 +232,11 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_PRECISION): vol.In(
                 [PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE]
             ),
+            vol.Optional(CONF_UNIQUE_ID): cv.string,
+            vol.Optional(CONF_STALE_DURATION): vol.All(
+                cv.time_period, cv.positive_timedelta
+            ),
+            vol.Optional(CONF_ENABLE_OLD_STATE, default=DEFAULT_OLD_STATE): cv.boolean,
             vol.Optional(HVAC_MODE_HEAT): vol.Schema(
                 {
                     vol.Required(CONF_ENTITY_ID): cv.entity_id,
@@ -291,6 +301,17 @@ PLATFORM_SCHEMA = vol.All(
                                 CONF_AUTOTUNE_CONTROL_TYPE,
                                 default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
                             ): cv.string,
+                        }
+                    ),
+                    # weather compensating mode"
+                    vol.Optional(CONF_WC_MODE): vol.Schema(
+                        {
+                            vol.Required(CONF_SENSOR_OUT): cv.entity_id,
+                            vol.Required(CONF_KA): vol.Coerce(float),
+                            vol.Required(CONF_KB): vol.Coerce(float),
+                            vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
+                                cv.time_period, cv.positive_timedelta
+                            ),
                         }
                     ),
                 }
@@ -361,12 +382,19 @@ PLATFORM_SCHEMA = vol.All(
                             ): cv.string,
                         }
                     ),
+                    # weather compensating mode"
+                    vol.Optional(CONF_WC_MODE): vol.Schema(
+                        {
+                            vol.Required(CONF_SENSOR_OUT): cv.entity_id,
+                            vol.Required(CONF_KA): vol.Coerce(float),
+                            vol.Required(CONF_KB): vol.Coerce(float),
+                            vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
+                                cv.time_period, cv.positive_timedelta
+                            ),
+                        }
+                    ),
                 }
             ),
-            vol.Optional(CONF_STALE_DURATION): vol.All(
-                cv.time_period, cv.positive_timedelta
-            ),
-            vol.Optional(CONF_ENABLE_OLD_STATE, default=DEFAULT_OLD_STATE): cv.boolean,
         }
     ),
 )
@@ -382,6 +410,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     initial_hvac_mode = config.get(CONF_INITIAL_HVAC_MODE)
     precision = config.get(CONF_PRECISION)
     unit = hass.config.units.temperature_unit
+    unique_id = config.get(CONF_UNIQUE_ID)
     initial_preset_mode = config.get(CONF_INITIAL_PRESET_MODE)
 
     sensor_stale_duration = config.get(CONF_STALE_DURATION)
@@ -405,6 +434,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
             GenericThermostat(
                 name,
                 unit,
+                unique_id,
                 precision,
                 sensor_entity_id,
                 hvac_def,
@@ -425,6 +455,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         self,
         name,
         unit,
+        unique_id,
         precision,
         sensor_entity_id,
         hvac_def,
@@ -440,7 +471,6 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         self._temp_precision = precision
         self._unit = unit
         self._hvac_def = hvac_def
-
         self._hvac_mode = initial_hvac_mode
         self._preset_mode = initial_preset_mode
         self._enabled_hvac_mode = enabled_hvac_modes
@@ -449,11 +479,37 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
 
         self._emergency_stop = False
         self._current_temperature = None
+        self._current_out_temperature = None
         self._current_mode = "off"
         self._old_mode = "off"
         self._hvac_on = None
 
         self._temp_lock = asyncio.Lock()
+
+        if unique_id is not None:
+            self._unique_id = unique_id
+        else:
+            if (
+                HVAC_MODE_HEAT in enabled_hvac_modes
+                and HVAC_MODE_COOL not in enabled_hvac_modes
+            ):
+                entity_id = self._hvac_def["heat"].get_hvac_switch
+                self._unique_id = slugify(f"{DOMAIN}_{entity_id}_{sensor_entity_id}")
+            elif (
+                HVAC_MODE_HEAT not in enabled_hvac_modes
+                and HVAC_MODE_COOL in enabled_hvac_modes
+            ):
+                entity_id = self._hvac_def["cool"].get_hvac_switch
+                self._unique_id = slugify(f"{DOMAIN}_{entity_id}_{sensor_entity_id}")
+            elif (
+                HVAC_MODE_HEAT in enabled_hvac_modes
+                and HVAC_MODE_COOL in enabled_hvac_modes
+            ):
+                entity_id_heat = self._hvac_def["heat"].get_hvac_switch
+                entity_id_cool = self._hvac_def["cool"].get_hvac_switch
+                self._unique_id = slugify(
+                    f"{DOMAIN}_{entity_id_heat}_{entity_id_cool}_{sensor_entity_id}"
+                )
 
     async def async_added_to_hass(self):
         """Run when entity about to be added.
@@ -470,6 +526,19 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 self._async_sensor_temperature_changed,
             )
         )
+
+        entity_list = []
+        for _, mode_def in self._hvac_def.items():
+            if mode_def.is_hvac_wc_mode:
+                entity_list.append(mode_def.get_wc_sensor)
+            if entity_list:
+                self.async_on_remove(
+                    async_track_state_change_event(
+                        self.hass,
+                        [self._sensor_entity_id],
+                        self._async_sensor_out_temperature_changed,
+                    )
+                )
 
         if self._sensor_stale_duration:
             self.async_on_remove(
@@ -672,7 +741,6 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         if not self._hvac_mode == HVAC_MODE_OFF:
             await self._async_operate(force=True)
 
-        await self._async_operate()
         self.async_write_ha_state()
 
     async def _async_sensor_temperature_changed(self, event):
@@ -684,27 +752,49 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             return
 
         self._async_update_current_temp(new_state)
-        # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
 
+        # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
         if not self._hvac_mode == HVAC_MODE_OFF:
-            if not self._hvac_on.is_hvac_on_off_mode:
+            if not self._hvac_on.is_hvac_pwm_mode:
+                await self._async_operate(sensor_changed=True)
+        self.async_write_ha_state()
+
+    async def _async_sensor_out_temperature_changed(self, event):
+        """Handle outdoor temperature changes."""
+        new_state = event.data.get("new_state")
+        _LOGGER.debug("Sensor outdoor temperature updated to %s", new_state.state)
+        if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            await self._activate_emergency_stop()
+            return
+
+        self._async_update_current_out_temp(new_state)
+
+        # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
+        if not self._hvac_mode == HVAC_MODE_OFF:
+            if not self._hvac_on.is_hvac_pwm_mode:
                 await self._async_operate(sensor_changed=True)
         self.async_write_ha_state()
 
     async def _async_check_sensor_not_responding(self, now=None):
         """Check if the sensor has emitted a value during the allowed stale period."""
+        entity_list = []
+        entity_list.append(self._sensor_entity_id)
+        for _, mode_def in self._hvac_def.items():
+            if mode_def.is_hvac_wc_mode:
+                entity_list.append(mode_def.get_wc_sensor)
 
-        sensor_state = self.hass.states.get(self._sensor_entity_id)
+        for entity_id in entity_list:
+            sensor_state = self.hass.states.get(entity_id)
 
-        if (
-            datetime.datetime.now(datetime.timezone.utc) - sensor_state.last_updated
-            > self._sensor_stale_duration
-        ):
-            _LOGGER.debug("Time is %s, last changed is %s, stale duration is %s")
-            _LOGGER.warning("Sensor is stalled, call the emergency stop")
-            await self._activate_emergency_stop()
+            if (
+                datetime.datetime.now(datetime.timezone.utc) - sensor_state.last_updated
+                > self._sensor_stale_duration
+            ):
+                _LOGGER.debug("Time is %s, last changed is %s, stale duration is %s")
+                _LOGGER.warning("Sensor is stalled, call the emergency stop")
+                await self._activate_emergency_stop()
 
-        return
+            return
 
     @callback
     def _async_switch_device_changed(self, event):
@@ -765,8 +855,24 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             _LOGGER.debug("Current temperature updated to %s", float(state.state))
             self._emergency_stop = False
             self._current_temperature = float(state.state)
+            if self._hvac_on:
+                self._hvac_on.set_current_temperature(self._current_temperature)
         except ValueError as ex:
             _LOGGER.error("Unable to update from sensor: %s", ex)
+
+    @callback
+    def _async_update_current_out_temp(self, state):
+        """Update thermostat with latest state from outdoor sensor."""
+        try:
+            _LOGGER.debug(
+                "Current outdoor temperature updated to %s", float(state.state)
+            )
+            self._emergency_stop = False
+            self._current_out_temperature = float(state.state)
+            if self._hvac_on:
+                self._hvac_on.set_outdoor_temperature(self._current_out_temperature)
+        except ValueError as ex:
+            _LOGGER.error("Unable to update from outdoor sensor: %s", ex)
 
     async def _async_operate(self, time=None, sensor_changed=False, force=False):
         """Check if we need to turn heating on or off."""
@@ -840,7 +946,10 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 """calculate control output and handle autotune"""
 
                 self._hvac_on.run_pid(
-                    self._current_temperature, self.target_temperature, force
+                    self.current_temperature,
+                    self._target_temp,
+                    self._current_out_temperature,
+                    force,
                 )
                 # restore preset mode when autotune is off
                 if (
@@ -849,6 +958,12 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 ):
                     self._preset_mode = PRESET_NONE
                 self.control_output = self._hvac_on.get_pid_control_output
+                _LOGGER.info("Obtained current control output: %s", self.control_output)
+                await self.set_controlvalue()
+            # weather compensating mode
+            elif not self._hvac_on.is_hvac_pwm_mode and self._hvac_on.is_hvac_wc_mode:
+                self._hvac_on.run_wc(self._target_temp, self._current_out_temperature)
+                self.control_output = self._hvac_on.get_wc_control_output
                 _LOGGER.info("Obtained current control output: %s", self.control_output)
                 await self.set_controlvalue()
 
@@ -1090,6 +1205,11 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
     def name(self):
         """Return the name of the thermostat."""
         return self._name
+
+    @property
+    def unique_id(self):
+        """Return the unique id of this thermostat."""
+        return self._unique_id
 
     @property
     def current_temperature(self):

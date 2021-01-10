@@ -2,6 +2,7 @@ from . import PID as pid_controller
 import time
 import logging
 
+
 from homeassistant.components.climate.const import (
     # ATTR_HVAC_MODE,
     # ATTR_PRESET_MODE,
@@ -62,8 +63,12 @@ CONF_AUTOTUNE_CONTROL_TYPE = "autotune_control_type"
 CONF_NOISEBAND = "noiseband"
 CONF_AUTOTUNE_LOOKBACK = "autotune_lookback"
 CONF_AUTOTUNE_STEP_SIZE = "tune_step_size"
-
 CONF_HEAT_METER = "heat_meter"
+
+# weather compensating mode
+CONF_WC_MODE = "WC_mode"
+CONF_KA = "ka"
+CONF_KB = "kb"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,13 +89,17 @@ class HVAC_Setting:
 
         self._pwm = []
         self._on_off = []
+        self._wc = []
         self._pwm = self._hvac_settings.get(CONF_PWM_MODE)
         self._on_off = self._hvac_settings.get(CONF_ON_OFF_MODE)
+        self._wc = self._hvac_settings.get(CONF_WC_MODE)
 
         self.pidAutotune = None
         self.pidController = None
         self.current_temperature = None
         self._autotune_state = False
+
+        self.outdoor_temperature = None
 
         if self.is_hvac_pwm_mode:
             self.check_heat_meter
@@ -122,7 +131,14 @@ class HVAC_Setting:
         min_cycle_duration = self._pwm[CONF_PID_REFRESH_INTERVAL]
 
         self.pidController = pid_controller.PIDController(
-            min_cycle_duration.seconds, kp, ki, kd, 0, difference, time.time
+            min_cycle_duration.seconds,
+            kp,
+            ki,
+            kd,
+            self.get_wc_param,
+            0,
+            difference,
+            time.time,
         )
 
         self.control_output = 0
@@ -133,7 +149,6 @@ class HVAC_Setting:
         self._autotune_state = True
         self.pidController = None
 
-        difference = self._pwm[CONF_DIFFERENCE]
         min_cycle_duration = self._pwm[CONF_PID_REFRESH_INTERVAL]
         step_size = self._pwm[CONF_AUTOTUNE_STEP_SIZE]
         noiseband = self._pwm[CONF_NOISEBAND]
@@ -163,10 +178,21 @@ class HVAC_Setting:
         elif self.pidController:
             self.pidController.reset_time()
 
-    def run_pid(self, current, target, force=False):
+    @property
+    def run_wc(self, setpoint, outdoor_temp):
+        KA, KB = self.get_wc_param
+        self.target_temperature = setpoint
+        self.outdoor_temperature = outdoor_temp
+
+        temp_diff = self.target_temperature - self.outdoor_temperature
+        self.control_output = temp_diff * KA + KB
+
+    def run_pid(self, current_temp, setpoint, outdoor_temp, force=False):
         autotune = self._pwm[CONF_AUTOTUNE]
-        self.current_temperature = current
-        self.target_temperature = target
+        # get latest temps with call of function as data is not transferred when thermostat is off
+        self.current_temperature = current_temp
+        self.target_temperature = setpoint
+        self.outdoor_temperature = outdoor_temp
 
         if self._autotune_state:
             _LOGGER.debug("Autotune mode")
@@ -204,6 +230,7 @@ class HVAC_Setting:
                     kd,
                     min_level,
                     max_level,
+                    self.get_wc_param,
                     time.time,
                 )
                 self._autotune_state = False
@@ -211,8 +238,12 @@ class HVAC_Setting:
             self.control_output = self.pidAutotune.output
         else:
             self.control_output = self.pidController.calc(
-                self.current_temperature, self.target_temperature, force
+                self.current_temperature,
+                self.target_temperature,
+                self.outdoor_temperature,
+                force,
             )
+
         if self.mode == HVAC_MODE_COOL:
             self.control_output *= -1
 
@@ -229,22 +260,22 @@ class HVAC_Setting:
         return [min_level, max_level]
 
     @property
-    def get_variable_attr(self):
-        tmp_dict = {}
-        tmp_dict["target"] = self.get_target_temp
-        if self.is_hvac_pwm_mode:
-
-            tmp_dict["PID_values"] = self.get_pid_param
-
-        return tmp_dict
-
-    @property
     def get_pid_param(self):
         """Return the pid parameters of the thermostat."""
         kp = self._pwm[CONF_KP]
         ki = self._pwm[CONF_KI]
         kd = self._pwm[CONF_KD]
         return (kp, ki, kd)
+
+    @property
+    def get_wc_param(self):
+        """Return the wc parameters of the thermostat."""
+        if self.is_hvac_wc_mode:
+            ka = self._wc[CONF_KA]
+            kb = self._wc[CONF_KB]
+            return (ka, kb)
+        else:
+            return (None, None)
 
     def set_pid_param(self, kp, ki, kd):
         """Set PID parameters."""
@@ -282,16 +313,24 @@ class HVAC_Setting:
         """return the control mode"""
         if self._pwm:
             return True
-        elif self._on_off:
+        else:
             return False
 
     @property
     def is_hvac_on_off_mode(self):
         """return the control mode"""
-        if self._pwm:
-            return False
-        elif self._on_off:
+        if self._on_off:
             return True
+        else:
+            return False
+
+    @property
+    def is_hvac_wc_mode(self):
+        """return the control mode"""
+        if self._wc:
+            return True
+        else:
+            return False
 
     @property
     def is_hvac_switch_on_off(self):
@@ -308,6 +347,16 @@ class HVAC_Setting:
             return False
 
     @property
+    def get_variable_attr(self):
+        tmp_dict = {}
+        tmp_dict["target"] = self.get_target_temp
+        if self.is_hvac_pwm_mode:
+
+            tmp_dict["PID_values"] = self.get_pid_param
+
+        return tmp_dict
+
+    @property
     def get_away_temp(self):
         return self.away_temp
 
@@ -315,6 +364,8 @@ class HVAC_Setting:
     def get_pwm_mode(self):
         if self.is_hvac_pwm_mode:
             return self._pwm[CONF_PWM]
+        elif self.is_hvac_wc_mode:
+            return self._wc[CONF_PWM]
         else:
             return None
 
@@ -329,6 +380,14 @@ class HVAC_Setting:
     def get_hvac_switch(self):
         """return the switch entity"""
         return self.entity_id
+
+    @property
+    def get_wc_sensor(self):
+        """return the sensor entity"""
+        if self.is_hvac_wc_mode:
+            return self.outdoor_temperature
+        else:
+            return None
 
     @property
     def get_keep_alive(self):
@@ -357,6 +416,9 @@ class HVAC_Setting:
 
     def set_current_temperature(self, current_temp):
         self.current_temperature = current_temp
+
+    def set_outdoor_temperature(self, current_temp):
+        self.outdoor_temperature = current_temp
 
     @property
     def get_target_temp_limits(self):
