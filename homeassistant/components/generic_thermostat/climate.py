@@ -74,7 +74,7 @@ DEFAULT_MAX_TEMP_HEAT = 24
 DEFAULT_MIN_TEMP_HEAT = 17
 DEFAULT_MAX_TEMP_COOL = 35
 DEFAULT_MIN_TEMP_COOL = 20
-
+DEFAULT_AREA = 0
 DEFAULT_INITIAL_HVAC_MODE = HVAC_MODE_OFF
 DEFAULT_INITIAL_PRESET_MODE = PRESET_NONE
 
@@ -103,7 +103,7 @@ CONF_HVAC_MODE_MAX_TEMP = "max_temp"
 CONF_HVAC_MODE_INIT_TEMP = "initial_target_temp"
 CONF_AWAY_TEMP = "away_temp"
 CONF_PRECISION = "precision"
-
+CONF_AREA = "room_area"
 CONF_ENABLE_OLD_STATE = "restore_from_old_state"
 CONF_STALE_DURATION = "sensor_stale_duration"
 # CONF_HVAC_SETTINGS = "_hvac_def"
@@ -130,7 +130,7 @@ CONF_AUTOTUNE_CONTROL_TYPE = "autotune_control_type"
 CONF_NOISEBAND = "noiseband"
 CONF_AUTOTUNE_LOOKBACK = "autotune_lookback"
 CONF_AUTOTUNE_STEP_SIZE = "tune_step_size"
-CONF_HEAT_METER = "heat_meter"
+# CONF_HEAT_METER = "heat_meter"
 PRESET_AUTOTUNE = "PID_autotune"
 
 # valve control (pid/pwm)
@@ -143,6 +143,12 @@ CONF_WC_MODE = "WC_mode"
 CONF_SENSOR_OUT = "sensor_out"
 CONF_KA = "ka"
 CONF_KB = "kb"
+
+# Master mode
+CONF_MASTER_MODE = "MASTER_mode"
+CONF_SATELITES = "satelites"
+CONF_GOAL = "goal"
+
 
 SUPPORT_FLAGS = SUPPORT_TARGET_TEMPERATURE
 
@@ -221,7 +227,7 @@ PLATFORM_SCHEMA = vol.All(
     validate_initial_preset_mode(),
     PLATFORM_SCHEMA.extend(
         {
-            vol.Required(CONF_SENSOR): cv.entity_id,
+            vol.Optional(CONF_SENSOR): cv.entity_id,
             vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
             vol.Optional(
                 CONF_INITIAL_HVAC_MODE, default=DEFAULT_INITIAL_HVAC_MODE
@@ -232,6 +238,7 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_PRECISION): vol.In(
                 [PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE]
             ),
+            vol.Optional(CONF_AREA, default=DEFAULT_AREA): vol.Coerce(float),
             vol.Optional(CONF_UNIQUE_ID): cv.string,
             vol.Optional(CONF_STALE_DURATION): vol.All(
                 cv.time_period, cv.positive_timedelta
@@ -296,7 +303,7 @@ PLATFORM_SCHEMA = vol.All(
                             vol.Optional(
                                 CONF_NOISEBAND, default=DEFAULT_NOISEBAND
                             ): vol.Coerce(float),
-                            vol.Optional(CONF_HEAT_METER): cv.entity_id,
+                            # vol.Optional(CONF_HEAT_METER): cv.entity_id,
                             vol.Optional(
                                 CONF_AUTOTUNE_CONTROL_TYPE,
                                 default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
@@ -312,6 +319,13 @@ PLATFORM_SCHEMA = vol.All(
                             vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
                                 cv.time_period, cv.positive_timedelta
                             ),
+                        }
+                    ),
+                    # master mode"
+                    vol.Optional(CONF_MASTER_MODE): vol.Schema(
+                        {
+                            vol.Required(CONF_SATELITES): cv.ensure_list,
+                            vol.Required(CONF_GOAL): vol.Coerce(float),
                         }
                     ),
                 }
@@ -375,7 +389,7 @@ PLATFORM_SCHEMA = vol.All(
                             vol.Optional(
                                 CONF_NOISEBAND, default=DEFAULT_NOISEBAND
                             ): vol.Coerce(float),
-                            vol.Optional(CONF_HEAT_METER): cv.entity_id,
+                            # vol.Optional(CONF_HEAT_METER): cv.entity_id,
                             vol.Optional(
                                 CONF_AUTOTUNE_CONTROL_TYPE,
                                 default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
@@ -391,6 +405,13 @@ PLATFORM_SCHEMA = vol.All(
                             vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
                                 cv.time_period, cv.positive_timedelta
                             ),
+                        }
+                    ),
+                    # master mode"
+                    vol.Optional(CONF_MASTER_MODE): vol.Schema(
+                        {
+                            vol.Required(CONF_SATELITES): cv.ensure_list,
+                            vol.Required(CONF_GOAL): vol.Coerce(float),
                         }
                     ),
                 }
@@ -412,7 +433,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     unit = hass.config.units.temperature_unit
     unique_id = config.get(CONF_UNIQUE_ID)
     initial_preset_mode = config.get(CONF_INITIAL_PRESET_MODE)
-
+    area = config.get(CONF_AREA)
     sensor_stale_duration = config.get(CONF_STALE_DURATION)
     enable_old_state = config.get(CONF_ENABLE_OLD_STATE)
     heat_conf = config.get(HVAC_MODE_HEAT)
@@ -436,6 +457,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
                 unit,
                 unique_id,
                 precision,
+                area,
                 sensor_entity_id,
                 hvac_def,
                 enabled_hvac_modes,
@@ -457,6 +479,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         unit,
         unique_id,
         precision,
+        area,
         sensor_entity_id,
         hvac_def,
         enabled_hvac_modes,
@@ -476,7 +499,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         self._enabled_hvac_mode = enabled_hvac_modes
         self._enable_old_state = enable_old_state
         self._sensor_stale_duration = sensor_stale_duration
-
+        self._area = area
         self._emergency_stop = False
         self._current_temperature = None
         self._current_out_temperature = None
@@ -485,7 +508,10 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         self._hvac_on = None
 
         self._temp_lock = asyncio.Lock()
-
+        if not self._sensor_entity_id:
+            sensor_entity = "None"
+        else:
+            sensor_entity = self._sensor_entity_id
         if unique_id is not None:
             self._unique_id = unique_id
         else:
@@ -494,13 +520,13 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 and HVAC_MODE_COOL not in enabled_hvac_modes
             ):
                 entity_id = self._hvac_def["heat"].get_hvac_switch
-                self._unique_id = slugify(f"{DOMAIN}_{entity_id}_{sensor_entity_id}")
+                self._unique_id = slugify(f"{DOMAIN}_{entity_id}_{sensor_entity}")
             elif (
                 HVAC_MODE_HEAT not in enabled_hvac_modes
                 and HVAC_MODE_COOL in enabled_hvac_modes
             ):
                 entity_id = self._hvac_def["cool"].get_hvac_switch
-                self._unique_id = slugify(f"{DOMAIN}_{entity_id}_{sensor_entity_id}")
+                self._unique_id = slugify(f"{DOMAIN}_{entity_id}_{sensor_entity}")
             elif (
                 HVAC_MODE_HEAT in enabled_hvac_modes
                 and HVAC_MODE_COOL in enabled_hvac_modes
@@ -508,7 +534,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 entity_id_heat = self._hvac_def["heat"].get_hvac_switch
                 entity_id_cool = self._hvac_def["cool"].get_hvac_switch
                 self._unique_id = slugify(
-                    f"{DOMAIN}_{entity_id_heat}_{entity_id_cool}_{sensor_entity_id}"
+                    f"{DOMAIN}_{entity_id_heat}_{entity_id_cool}_{sensor_entity}"
                 )
 
     async def async_added_to_hass(self):
@@ -519,13 +545,22 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         await super().async_added_to_hass()
 
         # Add listeners to track changes from the sensor and the heater's switch
-        self.async_on_remove(
-            async_track_state_change_event(
-                self.hass,
-                [self._sensor_entity_id],
-                self._async_sensor_temperature_changed,
+        if self._sensor_entity_id:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass,
+                    [self._sensor_entity_id],
+                    self._async_sensor_temperature_changed,
+                )
             )
-        )
+            if self._sensor_stale_duration:
+                self.async_on_remove(
+                    async_track_time_interval(
+                        self.hass,
+                        self._async_check_sensor_not_responding,
+                        self._sensor_stale_duration,
+                    )
+                )
 
         entity_list = []
         for _, mode_def in self._hvac_def.items():
@@ -535,19 +570,10 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 self.async_on_remove(
                     async_track_state_change_event(
                         self.hass,
-                        [self._sensor_entity_id],
+                        entity_list,
                         self._async_sensor_out_temperature_changed,
                     )
                 )
-
-        if self._sensor_stale_duration:
-            self.async_on_remove(
-                async_track_time_interval(
-                    self.hass,
-                    self._async_check_sensor_not_responding,
-                    self._sensor_stale_duration,
-                )
-            )
 
         entity_list = []
         for _, mode_def in self._hvac_def.items():
@@ -564,7 +590,10 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         @callback
         def _async_startup(*_):
             """Init on startup."""
-            sensor_state = self.hass.states.get(self._sensor_entity_id)
+            if self._sensor_entity_id:
+                sensor_state = self.hass.states.get(self._sensor_entity_id)
+            else:
+                sensor_state = None
             if sensor_state and sensor_state.state not in (
                 STATE_UNAVAILABLE,
                 STATE_UNKNOWN,
@@ -591,14 +620,6 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 old_hvac_mode,
                 old_temperature,
             )
-
-            # old_heat_conf = old_state.attributes.get(HVAC_MODE_HEAT)
-            # old_cool_on_off_conf = old_heat_conf.get(CONF_ON_OFF_MODE)
-            # old_cool_pwm_conf = old_heat_conf.get(CONF_PWM_MODE)
-
-            # old_cool_conf = old_state.attributes.get(HVAC_MODE_COOL)
-            # old_cool_on_off_conf = old_cool_conf.get(CONF_ON_OFF_MODE)
-            # old_cool_pwm_conf = old_cool_conf.get(CONF_PWM_MODE)
 
             if old_preset_mode is not None and old_preset_mode in self.preset_modes:
                 self._preset_mode = old_preset_mode
@@ -636,7 +657,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         tmp_dict = {}
         for key, data in self._hvac_def.items():
             tmp_dict[key] = data.get_variable_attr
-        return {"hvac_def": tmp_dict}
+        return {"hvac_def": tmp_dict, "room_area": self._area}
 
     async def async_set_hvac_mode(self, hvac_mode):
         """Set hvac mode."""
@@ -655,6 +676,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             and self._hvac_on.is_pwm_autotune_active
         ):
             self._hvac_on.start_pid()
+
         # restore preset mode
         self._preset_mode = PRESET_NONE
 
@@ -685,6 +707,11 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         if self._hvac_on.is_hvac_pwm_mode:
             self._hvac_on.pid_reset_time
             self.time_changed = time.time()
+        # start listener for satelite thermostats
+        if self._hvac_on.is_master_mode:
+            self._track_satelites()
+            self._current_temperature = self._hvac_on.master_current_temp()
+            self._target_temp = self._hvac_on.master_setpoint()
         await self._async_operate()
 
         # Ensure we update the current operation after changing the mode
@@ -703,6 +730,34 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                         self.hass, self._async_operate, keep_alive
                     )
                 )
+
+    def _track_satelites(self):
+        # get changes from satelite thermostats
+        entity_list = self._hvac_on.get_satelites
+        # sensor_state = self.hass.states.get(self._sensor_entity_id)
+        if entity_list:
+            satelites = ["climate." + sub for sub in entity_list]
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass,
+                    satelites,
+                    self._async_satelite_thermostat_changed,
+                )
+            )
+            for satelite in satelites:
+                state = self.hass.states.get(satelite)
+                self._send_satelite(state)
+
+    def _send_satelite(self, state):
+
+        self._hvac_on.update_satelite(
+            state.name,
+            state.state,
+            state.attributes.get("temperature"),
+            state.attributes.get("current_temperature"),
+            state.attributes.get("room_area"),
+            state.attributes.get("valve_pos"),
+        )
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
@@ -775,6 +830,21 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 await self._async_operate(sensor_changed=True)
         self.async_write_ha_state()
 
+    async def _async_satelite_thermostat_changed(self, event):
+        """Handle thermostat changes changes."""
+        new_state = event.data.get("new_state")
+        _LOGGER.debug("thermostat %s updated ", new_state.name)
+
+        self._send_satelite(new_state)
+        self._current_temperature = self._hvac_on.master_current_temp()
+        self._target_temp = self._hvac_on.master_setpoint()
+
+        # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
+        if not self._hvac_mode == HVAC_MODE_OFF:
+            if not self._hvac_on.is_hvac_pwm_mode:
+                await self._async_operate(sensor_changed=True)
+        self.async_write_ha_state()
+
     async def _async_check_sensor_not_responding(self, now=None):
         """Check if the sensor has emitted a value during the allowed stale period."""
         entity_list = []
@@ -827,23 +897,23 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                     new_state.state,
                 )
 
-            heat_meter_entity_id = self._hvac_on.get_heat_meter
-            if heat_meter_entity_id:
-                meter_attributes = {
-                    "friendly_name": "Valve position",
-                    "icon": "mdi:radiator",
-                    "unit_of_measurement": "%",
-                }
-                if new_state is None:
-                    self.hass.states.async_set(
-                        heat_meter_entity_id, 0, meter_attributes
-                    )
-                else:
-                    self.hass.states.async_set(
-                        heat_meter_entity_id,
-                        round(self.control_output, 1),
-                        meter_attributes,
-                    )
+            # heat_meter_entity_id = self._hvac_on.get_heat_meter
+            # if heat_meter_entity_id:
+            #     meter_attributes = {
+            #         "friendly_name": "Valve position",
+            #         "icon": "mdi:radiator",
+            #         "unit_of_measurement": "%",
+            #     }
+            #     if new_state is None:
+            #         self.hass.states.async_set(
+            #             heat_meter_entity_id, 0, meter_attributes
+            #         )
+            #     else:
+            #         self.hass.states.async_set(
+            #             heat_meter_entity_id,
+            #             round(self.control_output, 1),
+            #             meter_attributes,
+            #         )
         if new_state is None:
             return
         self.async_write_ha_state()
@@ -942,28 +1012,23 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                     await self._async_switch_turn_on(force=force_resend)
 
             # when mode is pwm
-            elif self._hvac_on.is_hvac_pwm_mode:
+            else:
                 """calculate control output and handle autotune"""
-
-                self._hvac_on.run_pid(
-                    self.current_temperature,
+                self._hvac_on.update_temperatures(
+                    self._current_temperature,
                     self._target_temp,
                     self._current_out_temperature,
-                    force,
                 )
+
+                self._hvac_on.calculate(force)
                 # restore preset mode when autotune is off
                 if (
                     self._preset_mode == PRESET_AUTOTUNE
                     and not self._hvac_on.is_pwm_autotune_active
                 ):
                     self._preset_mode = PRESET_NONE
-                self.control_output = self._hvac_on.get_pid_control_output
-                _LOGGER.info("Obtained current control output: %s", self.control_output)
-                await self.set_controlvalue()
-            # weather compensating mode
-            elif not self._hvac_on.is_hvac_pwm_mode and self._hvac_on.is_hvac_wc_mode:
-                self._hvac_on.run_wc(self._target_temp, self._current_out_temperature)
-                self.control_output = self._hvac_on.get_wc_control_output
+
+                self.control_output = self._hvac_on.get_control_output
                 _LOGGER.info("Obtained current control output: %s", self.control_output)
                 await self.set_controlvalue()
 
@@ -972,7 +1037,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         force_resend = True
         pwm = self._hvac_on.get_pwm_mode
         difference = self._hvac_on.get_difference
-        heat_meter_entity_id = self._hvac_on.get_heat_meter
+        # heat_meter_entity_id = self._hvac_on.get_heat_meter
         _, maxOut = self._hvac_on.get_pid_limits
 
         if pwm:
@@ -991,17 +1056,17 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 if self._is_switch_active:
                     await self._async_switch_turn_off(force=force_resend)
                     self.time_changed = time.time()
-            if heat_meter_entity_id:
-                meter_attributes = {
-                    "friendly_name": "Valve position",
-                    "icon": "mdi:radiator",
-                    "unit_of_measurement": "%",
-                }
-                self.hass.states.async_set(
-                    heat_meter_entity_id,
-                    round(self.control_output, 1),
-                    meter_attributes,
-                )
+            # if heat_meter_entity_id:
+            #     meter_attributes = {
+            #         "friendly_name": "Valve position",
+            #         "icon": "mdi:radiator",
+            #         "unit_of_measurement": "%",
+            #     }
+            #     self.hass.states.async_set(
+            #         heat_meter_entity_id,
+            #         round(self.control_output, 1),
+            #         meter_attributes,
+            #     )
         else:
             await self._async_switch_turn_on(force=force_resend)
 
@@ -1178,6 +1243,8 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         if not self._hvac_mode == HVAC_MODE_OFF:
             if self.preset_mode == PRESET_AWAY:
                 return self._hvac_on.get_away_temp
+            if self._hvac_on.is_master_mode:
+                return self._hvac_on._master_setpoint
             if self._hvac_on.min_target_temp:
                 return self._hvac_on.min_target_temp
 
@@ -1190,6 +1257,8 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         if not self._hvac_mode == HVAC_MODE_OFF:
             if self.preset_mode == PRESET_AWAY:
                 return self._hvac_on.get_away_temp
+            if self._hvac_on.is_master_mode:
+                return self._hvac_on._master_setpoint
             if self._hvac_on.max_target_temp:
                 return self._hvac_on.max_target_temp
 
