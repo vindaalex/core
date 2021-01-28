@@ -1,9 +1,11 @@
 """Generic thermostat.
 Incl support for smart (PID) thermostat units.
 For more details about this platform, please refer to the documentation at
-https: // github.com / fabiannydegger / custom_components / """
 
-# check use of min_cycle_duration vs keep_alive. duplicate and not proper included
+to do:
+- check async functions
+-
+"""
 
 import asyncio
 import logging
@@ -85,6 +87,7 @@ DEFAULT_HYSTERESIS_TOLERANCE = 0.5
 
 # PWM/PID controller
 DEFAULT_DIFFERENCE = 100
+DEFAULT_MIN_DIFFERENCE = 5
 DEFAULT_PWM = 0
 
 DEFAULT_AUTOTUNE = "none"
@@ -106,7 +109,6 @@ CONF_PRECISION = "precision"
 CONF_AREA = "room_area"
 CONF_ENABLE_OLD_STATE = "restore_from_old_state"
 CONF_STALE_DURATION = "sensor_stale_duration"
-# CONF_HVAC_SETTINGS = "_hvac_def"
 
 # on_off thermostat
 CONF_ON_OFF_MODE = "on_off_mode"
@@ -115,15 +117,23 @@ CONF_KEEP_ALIVE = "keep_alive"
 CONF_HYSTERESIS_TOLERANCE_ON = "hysteresis_tolerance_on"
 CONF_HYSTERESIS_TOLERANCE_OFF = "hysteresis_tolerance_off"
 
-# PWM/PID controller
-CONF_PWM_MODE = "PWM_mode"
-CONF_PID_REFRESH_INTERVAL = "PID_interval"
+# proportional mode
+CONF_PROPORTIONAL_MODE = "proportional_mode"
+CONF_PWM = "pwm"
+CONF_CONTROL_REFRESH_INTERVAL = "control_interval"
 CONF_DIFFERENCE = "difference"
+CONF_MIN_DIFFERENCE = "minimal_difference"
 
+# proportional valve control (pid/pwm)
+SERVICE_SET_VALUE = "set_value"
+ATTR_VALUE = "value"
+PLATFORM_INPUT_NUMBER = "input_number"
+
+# PWM/PID controller
+CONF_PID_MODE = "PID_mode"
 CONF_KP = "kp"
 CONF_KI = "ki"
 CONF_KD = "kd"
-CONF_PWM = "pwm"
 
 CONF_AUTOTUNE = "autotune"
 CONF_AUTOTUNE_CONTROL_TYPE = "autotune_control_type"
@@ -131,12 +141,8 @@ CONF_NOISEBAND = "noiseband"
 CONF_AUTOTUNE_LOOKBACK = "autotune_lookback"
 CONF_AUTOTUNE_STEP_SIZE = "tune_step_size"
 # CONF_HEAT_METER = "heat_meter"
-PRESET_AUTOTUNE = "PID_autotune"
-
-# valve control (pid/pwm)
-SERVICE_SET_VALUE = "set_value"
-ATTR_VALUE = "value"
-PLATFORM_INPUT_NUMBER = "input_number"
+PRESET_PID_AUTOTUNE = "PID_autotune"
+PRESET_VALVE_AUTOTUNE = "VALVE_autotune"
 
 # weather compensating mode
 CONF_WC_MODE = "WC_mode"
@@ -147,13 +153,38 @@ CONF_KB = "kb"
 # Master mode
 CONF_MASTER_MODE = "MASTER_mode"
 CONF_SATELITES = "satelites"
+# valve_control_mode
+# CONF_VALVE_MODE = "PID_VALVE_mode"
 CONF_GOAL = "goal"
-
 
 SUPPORT_FLAGS = SUPPORT_TARGET_TEMPERATURE
 
 SUPPORTED_HVAC_MODES = [HVAC_MODE_HEAT, HVAC_MODE_COOL, HVAC_MODE_OFF]
-SUPPORTED_PRESET_MODES = [PRESET_NONE, PRESET_AWAY, PRESET_AUTOTUNE]
+SUPPORTED_PRESET_MODES = [
+    PRESET_NONE,
+    PRESET_AWAY,
+    PRESET_PID_AUTOTUNE,
+    PRESET_VALVE_AUTOTUNE,
+]
+
+
+def validate_initial_control_mode(*keys: str) -> Callable:
+    """If an initial preset mode has been set, check if the values are set in both modes."""
+
+    def validate(obj: Dict) -> Dict:
+        """Check this condition."""
+        for hvac_mode in [HVAC_MODE_HEAT, HVAC_MODE_COOL]:
+            if hvac_mode in obj:
+                if all(
+                    x in obj[hvac_mode]
+                    for x in [CONF_ON_OFF_MODE, CONF_PROPORTIONAL_MODE]
+                ):
+                    raise vol.Invalid(
+                        "The on_off and proportional mode have both been set {hvac_mode} mode"
+                    )
+            return obj
+
+    return validate
 
 
 def validate_initial_preset_mode(*keys: str) -> Callable:
@@ -225,6 +256,7 @@ PLATFORM_SCHEMA = vol.All(
     validate_initial_hvac_mode(),
     check_presets_in_both_modes(),
     validate_initial_preset_mode(),
+    validate_initial_control_mode(),
     PLATFORM_SCHEMA.extend(
         {
             vol.Optional(CONF_SENSOR): cv.entity_id,
@@ -276,56 +308,80 @@ PLATFORM_SCHEMA = vol.All(
                             ),
                         }
                     ),
-                    # PID"
-                    vol.Optional(CONF_PWM_MODE): vol.Schema(
+                    # proportional mode"
+                    vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema(
                         {
-                            vol.Required(CONF_KP): vol.Coerce(float),
-                            vol.Required(CONF_KI): vol.Coerce(float),
-                            vol.Required(CONF_KD): vol.Coerce(float),
-                            vol.Required(CONF_PID_REFRESH_INTERVAL): vol.All(
+                            vol.Required(CONF_CONTROL_REFRESH_INTERVAL): vol.All(
                                 cv.time_period, cv.positive_timedelta
                             ),
                             vol.Optional(
                                 CONF_DIFFERENCE, default=DEFAULT_DIFFERENCE
                             ): vol.Coerce(float),
+                            vol.Optional(
+                                CONF_MIN_DIFFERENCE, default=DEFAULT_MIN_DIFFERENCE
+                            ): vol.Coerce(float),
                             vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
                                 cv.time_period, cv.positive_timedelta
                             ),
-                            vol.Optional(
-                                CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
-                            ): cv.string,
-                            vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
-                                cv.time_period, cv.positive_timedelta
+                            # PID mode
+                            vol.Optional(CONF_PID_MODE): vol.Schema(
+                                {
+                                    vol.Required(CONF_KP): vol.Coerce(float),
+                                    vol.Required(CONF_KI): vol.Coerce(float),
+                                    vol.Required(CONF_KD): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
+                                    ): cv.string,
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_CONTROL_TYPE,
+                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
+                                    ): cv.string,
+                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
+                                        cv.time_period, cv.positive_timedelta
+                                    ),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_STEP_SIZE,
+                                        default=DEFAULT_STEP_SIZE,
+                                    ): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
+                                    ): vol.Coerce(float),
+                                }
                             ),
-                            vol.Optional(
-                                CONF_AUTOTUNE_STEP_SIZE, default=DEFAULT_STEP_SIZE
-                            ): vol.Coerce(float),
-                            vol.Optional(
-                                CONF_NOISEBAND, default=DEFAULT_NOISEBAND
-                            ): vol.Coerce(float),
-                            # vol.Optional(CONF_HEAT_METER): cv.entity_id,
-                            vol.Optional(
-                                CONF_AUTOTUNE_CONTROL_TYPE,
-                                default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
-                            ): cv.string,
-                        }
-                    ),
-                    # weather compensating mode"
-                    vol.Optional(CONF_WC_MODE): vol.Schema(
-                        {
-                            vol.Required(CONF_SENSOR_OUT): cv.entity_id,
-                            vol.Required(CONF_KA): vol.Coerce(float),
-                            vol.Required(CONF_KB): vol.Coerce(float),
-                            vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
-                                cv.time_period, cv.positive_timedelta
+                            # weather compensating mode"
+                            vol.Optional(CONF_WC_MODE): vol.Schema(
+                                {
+                                    vol.Required(CONF_SENSOR_OUT): cv.entity_id,
+                                    vol.Required(CONF_KA): vol.Coerce(float),
+                                    vol.Required(CONF_KB): vol.Coerce(float),
+                                }
                             ),
-                        }
-                    ),
-                    # master mode"
-                    vol.Optional(CONF_MASTER_MODE): vol.Schema(
-                        {
-                            vol.Required(CONF_SATELITES): cv.ensure_list,
-                            vol.Required(CONF_GOAL): vol.Coerce(float),
+                            # master mode"
+                            vol.Optional(CONF_MASTER_MODE): vol.Schema(
+                                {
+                                    vol.Required(CONF_SATELITES): cv.ensure_list,
+                                    vol.Optional(CONF_KP): vol.Coerce(float),
+                                    vol.Optional(CONF_KI): vol.Coerce(float),
+                                    vol.Optional(CONF_KD): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
+                                    ): cv.string,
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_CONTROL_TYPE,
+                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
+                                    ): cv.string,
+                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
+                                        cv.time_period, cv.positive_timedelta
+                                    ),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_STEP_SIZE,
+                                        default=DEFAULT_STEP_SIZE,
+                                    ): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
+                                    ): vol.Coerce(float),
+                                }
+                            ),
                         }
                     ),
                 }
@@ -362,56 +418,81 @@ PLATFORM_SCHEMA = vol.All(
                             ),
                         }
                     ),
-                    # PID
-                    vol.Optional(CONF_PWM_MODE): vol.Schema(
+                    # proportional mode"
+                    vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema(
                         {
-                            vol.Required(CONF_KP): vol.Coerce(float),
-                            vol.Required(CONF_KI): vol.Coerce(float),
-                            vol.Required(CONF_KD): vol.Coerce(float),
-                            vol.Required(CONF_PID_REFRESH_INTERVAL): vol.All(
+                            vol.Required(CONF_CONTROL_REFRESH_INTERVAL): vol.All(
                                 cv.time_period, cv.positive_timedelta
                             ),
                             vol.Optional(
                                 CONF_DIFFERENCE, default=DEFAULT_DIFFERENCE
                             ): vol.Coerce(float),
+                            vol.Optional(
+                                CONF_MIN_DIFFERENCE, default=DEFAULT_MIN_DIFFERENCE
+                            ): vol.Coerce(float),
                             vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
                                 cv.time_period, cv.positive_timedelta
                             ),
-                            vol.Optional(
-                                CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
-                            ): cv.string,
-                            vol.Optional(
-                                CONF_AUTOTUNE_STEP_SIZE, default=DEFAULT_STEP_SIZE
-                            ): vol.Coerce(float),
-                            vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
-                                cv.time_period, cv.positive_timedelta
+                            # PID mode
+                            vol.Optional(CONF_PID_MODE): vol.Schema(
+                                {
+                                    vol.Required(CONF_KP): vol.Coerce(float),
+                                    vol.Required(CONF_KI): vol.Coerce(float),
+                                    vol.Required(CONF_KD): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
+                                    ): cv.string,
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_CONTROL_TYPE,
+                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
+                                    ): cv.string,
+                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
+                                        cv.time_period, cv.positive_timedelta
+                                    ),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_STEP_SIZE,
+                                        default=DEFAULT_STEP_SIZE,
+                                    ): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
+                                    ): vol.Coerce(float),
+                                }
                             ),
-                            vol.Optional(
-                                CONF_NOISEBAND, default=DEFAULT_NOISEBAND
-                            ): vol.Coerce(float),
-                            # vol.Optional(CONF_HEAT_METER): cv.entity_id,
-                            vol.Optional(
-                                CONF_AUTOTUNE_CONTROL_TYPE,
-                                default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
-                            ): cv.string,
-                        }
-                    ),
-                    # weather compensating mode"
-                    vol.Optional(CONF_WC_MODE): vol.Schema(
-                        {
-                            vol.Required(CONF_SENSOR_OUT): cv.entity_id,
-                            vol.Required(CONF_KA): vol.Coerce(float),
-                            vol.Required(CONF_KB): vol.Coerce(float),
-                            vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
-                                cv.time_period, cv.positive_timedelta
+                            # weather compensating mode"
+                            vol.Optional(CONF_WC_MODE): vol.Schema(
+                                {
+                                    vol.Required(CONF_SENSOR_OUT): cv.entity_id,
+                                    vol.Required(CONF_KA): vol.Coerce(float),
+                                    vol.Required(CONF_KB): vol.Coerce(float),
+                                }
                             ),
-                        }
-                    ),
-                    # master mode"
-                    vol.Optional(CONF_MASTER_MODE): vol.Schema(
-                        {
-                            vol.Required(CONF_SATELITES): cv.ensure_list,
-                            vol.Required(CONF_GOAL): vol.Coerce(float),
+                            # master mode"
+                            vol.Optional(CONF_MASTER_MODE): vol.Schema(
+                                {
+                                    vol.Required(CONF_SATELITES): cv.ensure_list,
+                                    vol.Required(CONF_SATELITES): cv.ensure_list,
+                                    vol.Optional(CONF_KP): vol.Coerce(float),
+                                    vol.Optional(CONF_KI): vol.Coerce(float),
+                                    vol.Optional(CONF_KD): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
+                                    ): cv.string,
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_CONTROL_TYPE,
+                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
+                                    ): cv.string,
+                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
+                                        cv.time_period, cv.positive_timedelta
+                                    ),
+                                    vol.Optional(
+                                        CONF_AUTOTUNE_STEP_SIZE,
+                                        default=DEFAULT_STEP_SIZE,
+                                    ): vol.Coerce(float),
+                                    vol.Optional(
+                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
+                                    ): vol.Coerce(float),
+                                }
+                            ),
                         }
                     ),
                 }
@@ -633,7 +714,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
 
                     for key, data in old_def.items():
                         if key in list(self._hvac_def.keys()):
-                            self._hvac_def[key].set_target_temperature(data["target"])
+                            self._hvac_def[key].restore_reboot(data)
 
                 # Restore the target temperature
                 if self._hvac_on:
@@ -671,11 +752,11 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         self._hvac_mode = hvac_mode
 
         # stop autotune
-        if (
-            self._preset_mode == PRESET_AUTOTUNE
-            and self._hvac_on.is_pwm_autotune_active
-        ):
-            self._hvac_on.start_pid()
+        if self._hvac_on:
+            if self._hvac_on.is_pid_autotune_active:
+                self._hvac_on.start_pid("pid")
+            elif self._hvac_on.is_valve_autotune_active:
+                self._hvac_on.start_pid("valve")
 
         # restore preset mode
         self._preset_mode = PRESET_NONE
@@ -703,21 +784,23 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             return
 
         # update listener
-        self._update_keep_alive()
-        if self._hvac_on.is_hvac_pwm_mode:
-            self._hvac_on.pid_reset_time
+        await self._async_update_keep_alive()
+        if self._hvac_on.is_hvac_proportional_mode:
             self.time_changed = time.time()
+        if self._hvac_on.is_hvac_pid_mode or self._hvac_on.is_hvac_valve_mode:
+            self._hvac_on.pid_reset_time
+
         # start listener for satelite thermostats
         if self._hvac_on.is_master_mode:
-            self._track_satelites()
-            self._current_temperature = self._hvac_on.master_current_temp()
-            self._target_temp = self._hvac_on.master_setpoint()
+            await self._async_track_satelites()
+            self._current_temperature = self._hvac_on.update_master_current_temp
+            self._target_temp = self._hvac_on.update_master_setpoint
         await self._async_operate()
 
         # Ensure we update the current operation after changing the mode
         self.async_write_ha_state()
 
-    def _update_keep_alive(self):
+    async def _async_update_keep_alive(self):
         # remove_listener(self._async_operate)
         if self._hvac_mode != HVAC_MODE_OFF:
             _LOGGER.debug("update 'keep alive' for %s", self._hvac_mode)
@@ -731,7 +814,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                     )
                 )
 
-    def _track_satelites(self):
+    async def _async_track_satelites(self):
         # get changes from satelite thermostats
         entity_list = self._hvac_on.get_satelites
         # sensor_state = self.hass.states.get(self._sensor_entity_id)
@@ -810,7 +893,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
 
         # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
         if not self._hvac_mode == HVAC_MODE_OFF:
-            if not self._hvac_on.is_hvac_pwm_mode:
+            if self._hvac_on.is_hvac_on_off_mode:
                 await self._async_operate(sensor_changed=True)
         self.async_write_ha_state()
 
@@ -824,10 +907,10 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
 
         self._async_update_current_out_temp(new_state)
 
-        # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
-        if not self._hvac_mode == HVAC_MODE_OFF:
-            if not self._hvac_on.is_hvac_pwm_mode:
-                await self._async_operate(sensor_changed=True)
+        # # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
+        # if not self._hvac_mode == HVAC_MODE_OFF:
+        #     if not self._hvac_on.is_hvac_pwm_mode:
+        #         await self._async_operate(sensor_changed=True)
         self.async_write_ha_state()
 
     async def _async_satelite_thermostat_changed(self, event):
@@ -836,13 +919,12 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         _LOGGER.debug("thermostat %s updated ", new_state.name)
 
         self._send_satelite(new_state)
-        self._current_temperature = self._hvac_on.master_current_temp()
-        self._target_temp = self._hvac_on.master_setpoint()
+        self._current_temperature = self._hvac_on.update_master_current_temp
+        self._target_temp = self._hvac_on.update_master_setpoint
 
         # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
         if not self._hvac_mode == HVAC_MODE_OFF:
-            if not self._hvac_on.is_hvac_pwm_mode:
-                await self._async_operate(sensor_changed=True)
+            await self._async_operate(sensor_changed=True)
         self.async_write_ha_state()
 
     async def _async_check_sensor_not_responding(self, now=None):
@@ -1023,22 +1105,25 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                 self._hvac_on.calculate(force)
                 # restore preset mode when autotune is off
                 if (
-                    self._preset_mode == PRESET_AUTOTUNE
-                    and not self._hvac_on.is_pwm_autotune_active
+                    self._preset_mode == PRESET_PID_AUTOTUNE
+                    and not self._hvac_on.is_pid_autotune_active
+                ) or (
+                    self._preset_mode == PRESET_VALVE_AUTOTUNE
+                    and not self._hvac_on.is_valve_autotune_active
                 ):
                     self._preset_mode = PRESET_NONE
 
                 self.control_output = self._hvac_on.get_control_output
                 _LOGGER.info("Obtained current control output: %s", self.control_output)
-                await self.set_controlvalue()
+                await self._async_set_controlvalue()
 
-    async def set_controlvalue(self):
+    async def _async_set_controlvalue(self):
         """Set Outputvalue for heater"""
         force_resend = True
         pwm = self._hvac_on.get_pwm_mode
         difference = self._hvac_on.get_difference
         # heat_meter_entity_id = self._hvac_on.get_heat_meter
-        _, maxOut = self._hvac_on.get_pid_limits
+        # _, maxOut = self._hvac_on.get_pid_limits
 
         if pwm:
             if self.control_output == difference:
@@ -1046,10 +1131,10 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
                     await self._async_switch_turn_on(force=force_resend)
 
                 self.time_changed = time.time()
-            elif self.control_output > 0:
-                await self.pwm_switch(
-                    pwm.seconds * self.control_output / maxOut,
-                    pwm.seconds * (maxOut - self.control_output) / maxOut,
+            elif self.control_output > self._hvac_on.get_min_difference:
+                await self._async_pwm_switch(
+                    pwm.seconds * self.control_output / difference,
+                    pwm.seconds * (difference - self.control_output) / difference,
                     time.time() - self.time_changed,
                 )
             else:
@@ -1068,9 +1153,16 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             #         meter_attributes,
             #     )
         else:
-            await self._async_switch_turn_on(force=force_resend)
+            if (
+                self._hvac_on.get_min_difference > self.control_output
+                and self._is_switch_active
+            ):
+                await self._async_switch_turn_off(force=force_resend)
+                self.time_changed = time.time()
+            else:
+                await self._async_switch_turn_on(force=force_resend)
 
-    async def pwm_switch(self, time_on, time_off, time_passed):
+    async def _async_pwm_switch(self, time_on, time_off, time_passed):
         """turn off and on the heater proportionally to controlvalue."""
         entity_id = self._hvac_on.get_hvac_switch
 
@@ -1165,7 +1257,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
         """Send an emergency OFF order to HVAC devices."""
         _LOGGER.warning("Emergency OFF order send to devices")
         self._emergency_stop = True
-        await self._async_switch_turn_off(True)
+        await self._async_switch_turn_off(force=True)
 
     async def async_set_preset_mode(self, preset_mode: str):
         """Set new preset mode.
@@ -1183,13 +1275,18 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
 
         if self._preset_mode == PRESET_AWAY:
             self._target_temp = self._hvac_on.get_away_temp
+        elif self._preset_mode == PRESET_PID_AUTOTUNE:
+            self._hvac_on.start_autotune("pid")
+        elif self._preset_mode == PRESET_VALVE_AUTOTUNE:
+            self._hvac_on.start_autotune("valve")
         else:
-            self._target_temp = self._hvac_on.get_target_temp
-
-        if self._preset_mode == PRESET_AUTOTUNE:
-            self._hvac_on.start_autotune(self._target_temp)
-        elif self._hvac_on.is_hvac_pwm_mode and self._hvac_on.is_pwm_autotune_active:
-            self._hvac_on.start_pid()
+            if self._hvac_on.is_hvac_pid_mode and self._hvac_on.is_pid_autotune_active:
+                self._hvac_on.start_pid("pid")
+            if (
+                self._hvac_on.is_hvac_valve_mode
+                and self._hvac_on.is_valve_autotune_active
+            ):
+                self._hvac_on.start_pid("valve")
 
         await self._async_operate(force=True)
         self.async_write_ha_state()
@@ -1326,17 +1423,12 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
     def preset_modes(self):
         """Return a list of available preset modes."""
         modes = [PRESET_NONE]
-
-        for _, mode_def in self._hvac_def.items():
-
-            if mode_def.get_away_temp:
+        if self._hvac_on:
+            if self._hvac_on.get_away_temp:
                 modes = modes + [PRESET_AWAY]
-                break
-
-        for _, mode_def in self._hvac_def.items():
-
-            if mode_def.is_pwm_autotune:
-                modes = modes + [PRESET_AUTOTUNE]
-                break
+            if self._hvac_on.is_autotune_present("pid"):
+                modes = modes + [PRESET_PID_AUTOTUNE]
+            if self._hvac_on.is_autotune_present("valve"):
+                modes = modes + [PRESET_VALVE_AUTOTUNE]
 
         return modes

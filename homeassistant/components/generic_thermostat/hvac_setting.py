@@ -48,22 +48,32 @@ CONF_KEEP_ALIVE = "keep_alive"
 CONF_HYSTERESIS_TOLERANCE_ON = "hysteresis_tolerance_on"
 CONF_HYSTERESIS_TOLERANCE_OFF = "hysteresis_tolerance_off"
 
-# PWM/PID controller
-CONF_PWM_MODE = "PWM_mode"
-CONF_PID_REFRESH_INTERVAL = "PID_interval"
+# proportional mode
+CONF_PROPORTIONAL_MODE = "proportional_mode"
+CONF_PWM = "pwm"
+CONF_CONTROL_REFRESH_INTERVAL = "control_interval"
 CONF_DIFFERENCE = "difference"
+CONF_MIN_DIFFERENCE = "minimal_difference"
 
+# proportional valve control (pid/pwm)
+SERVICE_SET_VALUE = "set_value"
+ATTR_VALUE = "value"
+PLATFORM_INPUT_NUMBER = "input_number"
+
+# PWM/PID controller
+CONF_PID_MODE = "PID_mode"
 CONF_KP = "kp"
 CONF_KI = "ki"
 CONF_KD = "kd"
-CONF_PWM = "pwm"
 
 CONF_AUTOTUNE = "autotune"
 CONF_AUTOTUNE_CONTROL_TYPE = "autotune_control_type"
 CONF_NOISEBAND = "noiseband"
 CONF_AUTOTUNE_LOOKBACK = "autotune_lookback"
 CONF_AUTOTUNE_STEP_SIZE = "tune_step_size"
-# CONF_HEAT_METER = "heat_meter"
+
+PRESET_PID_AUTOTUNE = "PID_autotune"
+PRESET_VALVE_AUTOTUNE = "VALVE_autotune"
 
 # weather compensating mode
 CONF_WC_MODE = "WC_mode"
@@ -71,11 +81,13 @@ CONF_SENSOR_OUT = "sensor_out"
 CONF_KA = "ka"
 CONF_KB = "kb"
 
-
 # Master mode
 CONF_MASTER_MODE = "MASTER_mode"
 CONF_SATELITES = "satelites"
+# valve_control_mode
+# CONF_VALVE_MODE = "PID_VALVE_mode"
 CONF_GOAL = "goal"
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,67 +100,80 @@ class HVAC_Setting:
         self._hvac_settings = conf
 
         self.target_temperature = self._hvac_settings[CONF_HVAC_MODE_INIT_TEMP]
-        self.min_target_temp = self._hvac_settings[CONF_HVAC_MODE_MIN_TEMP]
-        self.max_target_temp = self._hvac_settings[CONF_HVAC_MODE_MAX_TEMP]
         self.away_temp = self._hvac_settings[CONF_AWAY_TEMP]
-
         self.entity_id = self._hvac_settings[CONF_ENTITY_ID]
 
-        self._pwm = []
-        self._on_off = []
-        self._wc = []
-        self._master = []
-        self._pwm = self._hvac_settings.get(CONF_PWM_MODE)
-        self._on_off = self._hvac_settings.get(CONF_ON_OFF_MODE)
-        self._wc = self._hvac_settings.get(CONF_WC_MODE)
-        self._master = self._hvac_settings.get(CONF_MASTER_MODE)
-
-        self.pidAutotune = None
-        self.pidController = None
         self.current_temperature = None
-        self.control_output = {}
-        self._autotune_state = False
-
         self.outdoor_temperature = None
 
+        self._on_off = None
+        self._proportional = None
+        self._pid = None
+        self._wc = None
+        self._master = None
+
+        self._on_off = self._hvac_settings.get(CONF_ON_OFF_MODE)
+        self._proportional = self._hvac_settings.get(CONF_PROPORTIONAL_MODE)
+
+        if self.is_hvac_proportional_mode:
+            self._wc = self._proportional.get(CONF_WC_MODE)
+            self._pid = self._proportional.get(CONF_PID_MODE)
+            self._master = self._proportional.get(CONF_MASTER_MODE)
+
+        self.init_mode()
+
+    def init_mode(self):
         if self.is_hvac_on_off_mode:
             _LOGGER.debug("HVAC mode 'on_off' active")
             self.start_on_off()
-        if self.is_master_mode:
-            _LOGGER.debug("HVAC mode 'master' active")
-            self.start_master()
-        if self.is_hvac_pwm_mode:
-            _LOGGER.debug("HVAC mode 'pwm' active")
-            self.start_pid()
-            self.control_output["pwm"] = 0
-        if self.is_hvac_wc_mode:
-            _LOGGER.debug("HVAC mode 'weather control' active")
-            self.control_output["wc"] = 0
+        if self.is_hvac_proportional_mode:
+            _LOGGER.debug("HVAC mode 'proportional' active")
+            if self.is_master_mode:
+                _LOGGER.debug("HVAC mode 'master' active")
+                self.start_master()
+                if self.is_hvac_valve_mode:
+                    _LOGGER.debug("HVAC mode 'valve control' active")
+                    self.start_pid(self._master)
+                    self._master["control_output"] = 0
+            if self.is_hvac_pid_mode:
+                _LOGGER.debug("HVAC mode 'pid' active")
+                self.start_pid(self._pid)
+                self._pid["control_output"] = 0
+            if self.is_hvac_wc_mode:
+                _LOGGER.debug("HVAC mode 'weather control' active")
+                self._wc["control_output"] = 0
 
     def start_on_off(self):
         """set basic settings for hysteris mode"""
         _LOGGER.debug("Init on_off settings for mode : %s", self.mode)
         try:
-            self._pwm[CONF_KEEP_ALIVE]
+            self._on_off[CONF_KEEP_ALIVE]
         except:
-            self._pwm[CONF_KEEP_ALIVE] = None
+            self._on_off[CONF_KEEP_ALIVE] = None
 
     def start_master(self):
         """Init the master mode"""
         self._satelites = {}
         self._master_setpoint = 0
 
-    def start_pid(self):
+    def start_pid(self, hvac_data):
         """Init the PID controller"""
-        _LOGGER.debug("Init pwm settings for mode : %s", self.mode)
-        self._autotune_state = False
-        self.pidAutotune = None
+        _LOGGER.debug("Init pid settings for mode : %s", self.mode)
+        if isinstance(hvac_data, str):
+            if hvac_data == "pid":
+                hvac_data = self._pid
+            elif hvac_data == "valve":
+                hvac_data = self._master
 
-        difference = self._pwm[CONF_DIFFERENCE]
-        kp, ki, kd = self.get_pid_param
-        min_cycle_duration = self._pwm[CONF_PID_REFRESH_INTERVAL]
+        hvac_data.PID = {}
+        hvac_data.PID["_autotune_state"] = False
+        hvac_data.PID["pidAutotune"] = None
 
-        self.pidController = pid_controller.PIDController(
+        difference = self.get_difference
+        kp, ki, kd = self.get_pid_param(hvac_data)
+        min_cycle_duration = self.get_keep_alive
+
+        hvac_data.PID["pidController"] = pid_controller.PIDController(
             min_cycle_duration.seconds,
             kp,
             ki,
@@ -158,22 +183,30 @@ class HVAC_Setting:
             time.time,
         )
 
-        self.control_output["pid"] = 0
+        hvac_data["control_output"] = 0
 
-    def start_autotune(self, target_temp):
+    def start_autotune(self, mode):
         """Init the autotune"""
         _LOGGER.debug("Init autotune settings for mode : %s", self.mode)
-        self.target_temperature = target_temp
-        self._autotune_state = True
-        self.pidController = None
+        if mode == "pid":
+            hvac_data = self._pid
+            setpoint = self.target_temperature
+        elif mode == "valve":
+            hvac_data = self._master
+            setpoint = hvac_data[CONF_GOAL]
+        else:
+            _LOGGER.error("Init autotune failed, no autotune is present: %s", self.mode)
 
-        min_cycle_duration = self._pwm[CONF_PID_REFRESH_INTERVAL]
-        step_size = self._pwm[CONF_AUTOTUNE_STEP_SIZE]
-        noiseband = self._pwm[CONF_NOISEBAND]
-        autotune_lookback = self._pwm[CONF_AUTOTUNE_LOOKBACK]
+        hvac_data.PID["_autotune_state"] = True
+        hvac_data.PID["pidController"] = None
+
+        min_cycle_duration = self.get_keep_alive
+        step_size = hvac_data[CONF_AUTOTUNE_STEP_SIZE]
+        noiseband = hvac_data[CONF_NOISEBAND]
+        autotune_lookback = hvac_data[CONF_AUTOTUNE_LOOKBACK]
         min_level, max_level = self.get_pid_limits
-        self.pidAutotune = pid_controller.PIDAutotune(
-            self.target_temperature,
+        hvac_data.PID["pidAutotune"] = pid_controller.PIDAutotune(
+            setpoint,
             step_size,
             min_cycle_duration.seconds,
             autotune_lookback.seconds,
@@ -183,27 +216,33 @@ class HVAC_Setting:
             time.time,
         )
         _LOGGER.warning(
-            "Autotune will run with the current Setpoint Value you set. "
-            "Changes, submited after, doesn't have any effect until it's finished."
+            "Autotune will run with the current Setpoint %s Value you set. "
+            "Changes, submited after, doesn't have any effect until it's finished.",
+            setpoint,
         )
 
     def pid_reset_time(self):
         """Reset the current time for PID to avoid overflow of the intergral part
         when switching between hvac modes"""
-        autotune = self._pwm[CONF_AUTOTUNE]
-        if autotune != "none" and self.pidAutotune:
-            self.pidAutotune.reset_time()
-        elif self.pidController:
-            self.pidController.reset_time()
+        if self.is_hvac_pid_mode:
+            if self.is_pid_autotune_active:
+                self._pid.PID["pidAutotune"].reset_time()
+            elif self._pid.PID["pidController"]:
+                self._pid.PID["pidController"].reset_time()
+        if self.is_hvac_valve_mode:
+            if self.is_valve_autotune_active:
+                self._master.PID["pidAutotune"].reset_time()
+            elif self._master.PID["pidController"]:
+                self._master.PID["pidController"].reset_time()
 
     def calculate(self, force=None):
         """Calculate the current control value for all activated modes"""
         if self.is_master_mode:
             """override the setpoint and current temperature by satelites when in master mode"""
-            self.current_temperature = self.master_current_temp()
-            self.target_temperature = self.master_setpoint()
+            self.current_temperature = self.update_master_current_temp
+            self.target_temperature = self.update_master_setpoint
 
-        if self.is_hvac_pwm_mode:
+        if self.is_hvac_pid_mode:
             self.run_pid(force)
         if self.is_hvac_wc_mode:
             self.run_wc()
@@ -211,67 +250,84 @@ class HVAC_Setting:
     def run_wc(self):
         """calcuate weather compension mode"""
         KA, KB = self.get_wc_param
-        temp_diff = self.target_temperature - self.outdoor_temperature
-        self.control_output["wc"] = temp_diff * KA + KB
+        if self.outdoor_temperature:
+            temp_diff = self.target_temperature - self.outdoor_temperature
+            self._wc["control_output"] = temp_diff * KA + KB
 
     def run_pid(self, force=False):
         """calcuate the PID for current timestep"""
-        autotune = self._pwm[CONF_AUTOTUNE]
-        if self._autotune_state:
-            _LOGGER.debug("Autotune mode")
-            autotune_control_type = self._pwm[CONF_AUTOTUNE_CONTROL_TYPE]
+        hvacs = []
+        if self.is_hvac_pid_mode:
+            hvacs.append(self._pid)
+        if self.is_hvac_valve_mode:
+            hvacs.append(self._master)
 
-            cycle_time = self._pwm[CONF_PID_REFRESH_INTERVAL]
-            self._pwm[CONF_DIFFERENCE]
-            min_level, max_level = self.get_pid_limits
+        for hvac_data in hvacs:
+            if CONF_SATELITES in hvac_data:
+                current = self.update_master_valve_position
+                setpoint = hvac_data[CONF_GOAL]
+            else:
+                current = self.current_temperature
+                setpoint = self.target_temperature
+            if hvac_data.PID["_autotune_state"]:
+                _LOGGER.debug("Autotune mode")
+                autotune = hvac_data[CONF_AUTOTUNE]
+                autotune_control_type = hvac_data[CONF_AUTOTUNE_CONTROL_TYPE]
+                cycle_time = self._proportional[CONF_CONTROL_REFRESH_INTERVAL]
+                min_level, max_level = self.get_pid_limits
+                if hvac_data.PID["pidAutotune"].run(current):
+                    if autotune_control_type == "none":
+                        params = hvac_data.PID["pidAutotune"].get_pid_parameters(
+                            autotune, True
+                        )
+                    else:
+                        params = hvac_data.PID["pidAutotune"].get_pid_parameters(
+                            autotune, False, autotune_control_type
+                        )
+                    if params:
+                        kp = params.Kp
+                        ki = params.Ki
+                        kd = params.Kd
+                        self.set_pid_param(kp, ki, kd, hvac_data)
 
-            if self.pidAutotune.run(self.current_temperature):
-                if autotune_control_type == "none":
-                    params = self.pidAutotune.get_pid_parameters(autotune, True)
-                else:
-                    params = self.pidAutotune.get_pid_parameters(
-                        autotune, False, autotune_control_type
+                        _LOGGER.warning(
+                            "Set Kp, Ki, Kd. "
+                            "Smart thermostat now runs on autotune PID Controller: %s,  %s,  %s",
+                            kp,
+                            ki,
+                            kd,
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "autotune has failed, continue with default values"
+                        )
+
+                    hvac_data.PID["pidController"] = pid_controller.PIDController(
+                        cycle_time.seconds,
+                        kp,
+                        ki,
+                        kd,
+                        min_level,
+                        max_level,
+                        time.time,
                     )
+                    hvac_data.PID["_autotune_state"] = False
 
-                kp = params.Kp
-                ki = params.Ki
-                kd = params.Kd
-                self.set_pid_param(kp, ki, kd)
-
-                _LOGGER.warning(
-                    "Set Kp, Ki, Kd. "
-                    "Smart thermostat now runs on autotune PID Controller: %s,  %s,  %s",
-                    kp,
-                    ki,
-                    kd,
+                hvac_data["control_output"] = hvac_data.PID["pidAutotune"].output
+            else:
+                hvac_data["control_output"] = hvac_data.PID["pidController"].calc(
+                    current,
+                    setpoint,
+                    force,
                 )
 
-                self.pidController = pid_controller.PIDController(
-                    cycle_time.seconds,
-                    kp,
-                    ki,
-                    kd,
-                    min_level,
-                    max_level,
-                    time.time,
-                )
-                self._autotune_state = False
-
-            self.control_output["pid"] = self.pidAutotune.output
-        else:
-            self.control_output["pid"] = self.pidController.calc(
-                self.current_temperature,
-                self.target_temperature,
-                force,
-            )
-
-        if self.mode == HVAC_MODE_COOL:
-            self.control_output["pid"] *= -1
+            if self.mode == HVAC_MODE_COOL:
+                hvac_data["control_output"] *= -1
 
     @property
     def get_pid_limits(self):
         """Bandwitdh for control value"""
-        difference = self._pwm[CONF_DIFFERENCE]
+        difference = self._proportional[CONF_DIFFERENCE]
         if self.mode == HVAC_MODE_HEAT:
             min_level = 0
             max_level = difference
@@ -281,21 +337,77 @@ class HVAC_Setting:
 
         return [min_level, max_level]
 
-    @property
-    def get_pid_param(self):
+    def set_pid_param(self, kp, ki, kd, hvac_data):
+        """Set PID parameters."""
+        hvac_data[CONF_KP] = kp
+        hvac_data[CONF_KI] = ki
+        hvac_data[CONF_KD] = kd
+        # self._async_control_heating()
+        # yield from self.async_update_ha_state()
+        # await self.async_write_ha_state()
+
+    def get_pid_param(self, hvac_data):
         """Return the pid parameters of the thermostat."""
-        kp = self._pwm[CONF_KP]
-        ki = self._pwm[CONF_KI]
-        kd = self._pwm[CONF_KD]
+        kp = None
+        ki = None
+        kd = None
+
+        if CONF_KP in hvac_data:
+            kp = hvac_data[CONF_KP]
+        if CONF_KI in hvac_data:
+            ki = hvac_data[CONF_KI]
+        if CONF_KD in hvac_data:
+            kd = hvac_data[CONF_KD]
         return (kp, ki, kd)
+
+    def update_temperatures(self, current_temp, setpoint, outdoor_temp):
+        """ set latest temps with call of function as data is not transferred when thermostat is off"""
+        self.current_temperature = current_temp
+        self.target_temperature = setpoint
+        self.outdoor_temperature = outdoor_temp
+
+    @property
+    def min_target_temp(self):
+        if self.is_hvac_pid_mode and self.is_pid_autotune_active:
+            return self._pid.PID["pidAutotune"].setpoint
+        elif self.is_hvac_valve_mode and self.is_valve_autotune_active:
+            return self._master.PID["pidAutotune"].setpoint
+        else:
+            return self._hvac_settings[CONF_HVAC_MODE_MIN_TEMP]
+
+    @property
+    def max_target_temp(self):
+        if self.is_hvac_pid_mode and self.is_pid_autotune_active:
+            return self._pid.PID["pidAutotune"].setpoint
+        elif self.is_hvac_valve_mode and self.is_valve_autotune_active:
+            return self._master.PID["pidAutotune"].setpoint
+        else:
+            return self._hvac_settings[CONF_HVAC_MODE_MAX_TEMP]
+
+    @property
+    def get_control_output(self):
+        """Return the pid control output of the thermostat."""
+        key = "control_output"
+        control_output = 0
+        if self.is_hvac_pid_mode:
+            control_output += self._pid[key]
+        if self.is_hvac_wc_mode:
+            control_output += self._wc[key]
+        if self.is_hvac_valve_mode:
+            control_output += self._master[key]
+
+        if control_output > self.get_difference:
+            return self.get_difference
+        else:
+            return control_output
 
     # @property
     # def check_heat_meter(self):
     #     # check if heater is specified
     #     try:
-    #         self._pwm[CONF_HEAT_METER]
+    #         self._pid[CONF_HEAT_METER]
     #     except:
-    #         self._pwm[CONF_HEAT_METER] = None
+    #         self._pid[CONF_HEAT_METER] = None
 
     @property
     def get_wc_param(self):
@@ -307,56 +419,73 @@ class HVAC_Setting:
         else:
             return (None, None)
 
-    def update_temperatures(self, current_temp, setpoint, outdoor_temp):
-        """ set latest temps with call of function as data is not transferred when thermostat is off"""
-        self.current_temperature = current_temp
-        self.target_temperature = setpoint
-        self.outdoor_temperature = outdoor_temp
-
-    def set_pid_param(self, kp, ki, kd):
-        """Set PID parameters."""
-        self._pwm[CONF_KP] = kp
-        self._pwm[CONF_KI] = ki
-        self._pwm[CONF_KD] = kd
-        # self._async_control_heating()
-        # yield from self.async_update_ha_state()
-        # await self.async_write_ha_state()
-
-    @property
-    def get_control_output(self):
-        """Return the pid control output of the thermostat."""
-        return sum(list(self.control_output.values()))
-
-    @property
-    def is_pwm_autotune(self):
+    def is_autotune_present(self, hvac_data=None):
         """Return if pid autotune is included."""
-        autotune = self._pwm[CONF_AUTOTUNE]
-        if autotune != "none":
-            return True
+
+        def check_data(data_set):
+            if CONF_AUTOTUNE in data_set:
+                autotune = data_set[CONF_AUTOTUNE]
+                if autotune != "none":
+                    return True
+
+        if isinstance(hvac_data, str):
+            if hvac_data == "pid":
+                if self.is_hvac_pid_mode:
+                    if check_data(self._pid):
+                        return True
+            elif hvac_data == "valve":
+                if self.is_hvac_valve_mode:
+                    if check_data(self._master):
+                        return True
+        elif hvac_data:
+            if check_data(hvac_data):
+                return True
         else:
-            return False
+            if self.is_hvac_pid_mode:
+                if check_data(self._pid):
+                    return True
+            if self.is_hvac_valve_mode:
+                if check_data(self._master):
+                    return True
+
+        return False
 
     @property
-    def is_satelite_allowed(self):
+    def is_pid_autotune_active(self):
         """Return if pid autotune is running."""
-        if self._pwm or self._wc and not self._master:
-            return True
-        else:
-            return False
+        if CONF_AUTOTUNE in self._pid:
+            hvac_data = self._pid
+            if hvac_data.PID["_autotune_state"]:
+                return True
+
+        return False
 
     @property
-    def is_pwm_autotune_active(self):
-        """Return if pid autotune is running."""
-        if self._autotune_state:
-            return True
-        else:
-            return False
+    def is_valve_autotune_active(self):
+        """Return if valve autotune is running."""
+        if CONF_AUTOTUNE in self._master:
+            hvac_data = self._master
+            if hvac_data.PID["_autotune_state"]:
+                return True
+
+        return False
 
     @property
-    def is_hvac_pwm_mode(self):
+    def is_hvac_pid_mode(self):
         """return the control mode"""
-        if self._pwm:
+        if self._pid:
             return True
+        else:
+            return False
+
+    @property
+    def is_hvac_valve_mode(self):
+        """return the control mode"""
+        if self.is_master_mode:
+            if CONF_GOAL in self._master:
+                return True
+            else:
+                return False
         else:
             return False
 
@@ -364,6 +493,14 @@ class HVAC_Setting:
     def is_hvac_on_off_mode(self):
         """return the control mode"""
         if self._on_off:
+            return True
+        else:
+            return False
+
+    @property
+    def is_hvac_proportional_mode(self):
+        """return the control mode"""
+        if self._proportional:
             return True
         else:
             return False
@@ -387,15 +524,7 @@ class HVAC_Setting:
     @property
     def is_hvac_switch_on_off(self):
         """check if on-off mode is active"""
-        if self.is_hvac_on_off_mode or self.is_hvac_pwm_mode and self.get_pwm_mode == 0:
-            return False
-        else:
-            return True
-
-    @property
-    def is_hvac_switch_modulating(self):
-        """check if switch is switched on-off or proportional output is set"""
-        if self.is_hvac_on_off_mode or self.is_hvac_pwm_mode and self.get_pwm_mode == 0:
+        if self.is_hvac_on_off_mode or not self.get_pwm_mode == 0:
             return True
         else:
             return False
@@ -407,16 +536,41 @@ class HVAC_Setting:
         tmp_dict["target"] = self.get_target_temp
         tmp_dict["satelite_allowed"] = self.is_satelite_allowed
 
-        if self.is_hvac_pwm_mode:
-            tmp_dict["PID_values"] = self.get_pid_param
-        if self.is_hvac_wc_mode:
-            tmp_dict["ab_values"] = self.get_wc_param
-        if not self.is_hvac_on_off_mode:
-            tmp_dict["valve_pos"] = self.get_control_output
         if self.is_master_mode:
             tmp_dict["satelites"] = self.get_satelites
-
+        if self.is_hvac_proportional_mode:
+            tmp_dict["valve_pos"] = self.get_control_output
+        if self.is_hvac_pid_mode:
+            tmp_dict["PID_values"] = self.get_pid_param(self._pid)
+            if self._pid.PID["pidController"]:
+                tmp_dict["PID_integral"] = self._pid.PID["pidController"].get_integral
+        if self.is_hvac_valve_mode:
+            tmp_dict["Valve_PID_values"] = self.get_pid_param(self._master)
+            if self._master.PID["pidController"]:
+                tmp_dict["Valve_PID_integral"] = self._master.PID[
+                    "pidController"
+                ].get_integral
+        if self.is_hvac_wc_mode:
+            tmp_dict["ab_values"] = self.get_wc_param
         return tmp_dict
+
+    def restore_reboot(self, data):
+        """restore attributes for climate entity"""
+        self.set_target_temperature(data["target"])
+
+        if self.is_hvac_pid_mode:
+            self.set_pid_param(*data["PID_values"], self._pid)
+        if self.is_hvac_valve_mode:
+            self.set_pid_param(*data["Valve_PID_values"], self._master)
+
+        self.init_mode()
+
+        if self.is_hvac_pid_mode:
+            self._pid.PID["pidController"].set_integral(data["PID_integral"])
+        if self.is_hvac_valve_mode:
+            self._master.PID["pidController"].set_integral(data["Valve_PID_integral"])
+
+        self.pid_reset_time()
 
     @property
     def get_away_temp(self):
@@ -426,18 +580,24 @@ class HVAC_Setting:
     @property
     def get_pwm_mode(self):
         """return pwm interval time"""
-        if self.is_hvac_pwm_mode:
-            return self._pwm[CONF_PWM]
-        elif self.is_hvac_wc_mode:
-            return self._wc[CONF_PWM]
+        if self.is_hvac_proportional_mode:
+            return self._proportional[CONF_PWM]
         else:
             return None
 
     @property
     def get_difference(self):
         """get deadband range"""
-        if self.is_hvac_pwm_mode:
-            return self._pwm[CONF_DIFFERENCE]
+        if self.is_hvac_proportional_mode:
+            return self._proportional[CONF_DIFFERENCE]
+        else:
+            return None
+
+    @property
+    def get_min_difference(self):
+        """get deadband range"""
+        if self.is_hvac_proportional_mode:
+            return self._proportional[CONF_MIN_DIFFERENCE]
         else:
             return None
 
@@ -455,6 +615,14 @@ class HVAC_Setting:
             return None
 
     @property
+    def is_satelite_allowed(self):
+        """Return if pid autotune is running."""
+        if self.is_hvac_proportional_mode and not self.is_master_mode:
+            return True
+        else:
+            return False
+
+    @property
     def get_satelites(self):
         """return the satelite thermostats"""
         if self.is_master_mode:
@@ -467,20 +635,20 @@ class HVAC_Setting:
         """return interval for recalcuate (control value)"""
         if self.is_hvac_on_off_mode:
             return self._on_off[CONF_KEEP_ALIVE]
-        else:
-            return self._pwm[CONF_PID_REFRESH_INTERVAL]
+        elif self.is_hvac_proportional_mode:
+            return self._proportional[CONF_CONTROL_REFRESH_INTERVAL]
 
     # @property
     # def get_heat_meter(self):
-    #     return self._pwm[CONF_HEAT_METER]
+    #     return self._pid[CONF_HEAT_METER]
 
     @property
     def get_min_cycle(self):
         """minimum duration before recalcute"""
         if self.is_hvac_on_off_mode:
             return self._on_off[CONF_MIN_CYCLE_DURATION]
-        elif self.is_hvac_pwm_mode:
-            return self._pwm[CONF_PID_REFRESH_INTERVAL]
+        else:
+            return self._pid[CONF_CONTROL_REFRESH_INTERVAL]
 
     @property
     def get_target_temp(self):
@@ -502,7 +670,10 @@ class HVAC_Setting:
     @property
     def get_target_temp_limits(self):
         """get range of allowed setpoint range"""
-        return [self.min_target_temp, self.max_target_temp]
+        return [
+            self._hvac_settings[CONF_HVAC_MODE_MIN_TEMP],
+            self._hvac_settings[CONF_HVAC_MODE_MAX_TEMP],
+        ]
 
     @property
     def get_hysteris(self):
@@ -511,6 +682,8 @@ class HVAC_Setting:
         tolerance_off = self._on_off[CONF_HYSTERESIS_TOLERANCE_OFF]
 
         return [tolerance_on, tolerance_off]
+
+    """ MASER MODE FUNCTIONS """
 
     def update_satelite(self, name, mode, setpoint, current, area, valve):
         """set new state of a satelite"""
@@ -522,7 +695,8 @@ class HVAC_Setting:
             "valve_pos": valve,
         }
 
-    def master_setpoint(self):
+    @property
+    def update_master_setpoint(self):
         """set setpoint based on satelites"""
         sum_area = 0
         sum_product = 0
@@ -537,7 +711,8 @@ class HVAC_Setting:
             self._master_setpoint = None
         return self._master_setpoint
 
-    def master_current_temp(self):
+    @property
+    def update_master_current_temp(self):
         """set current temperature by satelites"""
         sum_area = 0
         sum_product = 0
@@ -553,7 +728,8 @@ class HVAC_Setting:
 
         return self._master_current
 
-    def master_valve_position(self):
+    @property
+    def update_master_valve_position(self):
         """get maximal valve opening"""
         valve_pos = 0
 

@@ -4,5 +4,5 @@
     "documentation": "https://www.home-assistant.io/integrations/generic_thermostat",
     "requirements": [],
     "dependencies": ["sensor", "switch"],
-    "codeowners": ["@DB-CL"]
+    "codeowners": ["a.."]
 }
