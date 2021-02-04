@@ -1,4 +1,4 @@
-"""Generic thermostat.
+"""Smarter thermostat.
 Incl support for smart (PID) thermostat units.
 For more details about this platform, please refer to the documentation at
 
@@ -58,6 +58,8 @@ from homeassistant.helpers.event import (
     async_track_time_interval,
 )
 
+from homeassistant.helpers import entity_platform
+
 # from homeassistant.helpers.update_coordinator.DataUpdateCoordinator import (
 #     async_remove_listener,
 # )
@@ -69,7 +71,7 @@ from . import DOMAIN, PLATFORMS
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_NAME = "Generic Thermostat"
+DEFAULT_NAME = "Smarter Thermostat"
 DEFAULT_TARGET_TEMP_HEAT = 19.0
 DEFAULT_TARGET_TEMP_COOL = 28.0
 DEFAULT_MAX_TEMP_HEAT = 24
@@ -360,6 +362,7 @@ PLATFORM_SCHEMA = vol.All(
                             vol.Optional(CONF_MASTER_MODE): vol.Schema(
                                 {
                                     vol.Required(CONF_SATELITES): cv.ensure_list,
+                                    vol.Optional(CONF_GOAL): vol.Coerce(float),
                                     vol.Optional(CONF_KP): vol.Coerce(float),
                                     vol.Optional(CONF_KI): vol.Coerce(float),
                                     vol.Optional(CONF_KD): vol.Coerce(float),
@@ -470,7 +473,7 @@ PLATFORM_SCHEMA = vol.All(
                             vol.Optional(CONF_MASTER_MODE): vol.Schema(
                                 {
                                     vol.Required(CONF_SATELITES): cv.ensure_list,
-                                    vol.Required(CONF_SATELITES): cv.ensure_list,
+                                    vol.Optional(CONF_GOAL): vol.Coerce(float),
                                     vol.Optional(CONF_KP): vol.Coerce(float),
                                     vol.Optional(CONF_KI): vol.Coerce(float),
                                     vol.Optional(CONF_KD): vol.Coerce(float),
@@ -503,9 +506,61 @@ PLATFORM_SCHEMA = vol.All(
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up the generic thermostat platform."""
+    """Set up the smarter thermostat platform."""
 
     await async_setup_reload_service(hass, DOMAIN, PLATFORMS)
+
+    platform = entity_platform.current_platform.get()
+    assert platform
+
+    platform.async_register_entity_service(  # type: ignore
+        "set_min_diff",
+        {
+            vol.Required("hvac_mode"): cv.string,
+            vol.Required("min_diff"): vol.Coerce(float),
+        },
+        "async_set_min_diff",
+    )
+
+    platform.async_register_entity_service(  # type: ignore
+        "set_pid",
+        {
+            vol.Required("hvac_mode"): cv.string,
+            vol.Required("control_mode"): cv.string,
+            vol.Optional("kp"): vol.Coerce(float),
+            vol.Optional("ki"): vol.Coerce(float),
+            vol.Optional("kd"): vol.Coerce(float),
+            vol.Optional("update", default=True): vol.Boolean,
+        },
+        "async_set_pid",
+    )
+
+    platform.async_register_entity_service(  # type: ignore
+        "set_integral",
+        {
+            vol.Required("hvac_mode"): cv.string,
+            vol.Required("control_mode"): cv.string,
+            vol.Required("integral"): vol.Coerce(float),
+        },
+        "async_set_integral",
+    )
+    platform.async_register_entity_service(  # type: ignore
+        "set_goal",
+        {
+            vol.Required("hvac_mode"): cv.string,
+            vol.Required("goal"): vol.Coerce(float),
+        },
+        "async_set_integral",
+    )
+    platform.async_register_entity_service(  # type: ignore
+        "set_ka_kb",
+        {
+            vol.Required("hvac_mode"): cv.string,
+            vol.Optional("ka"): vol.Coerce(float),
+            vol.Optional("kb"): vol.Coerce(float),
+        },
+        "async_set_ka_kb",
+    )
 
     name = config.get(CONF_NAME)
     sensor_entity_id = config.get(CONF_SENSOR)
@@ -533,7 +588,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
     async_add_entities(
         [
-            GenericThermostat(
+            SmarterThermostat(
                 name,
                 unit,
                 unique_id,
@@ -551,8 +606,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     )
 
 
-class GenericThermostat(ClimateEntity, RestoreEntity):
-    """Representation of a Generic Thermostat device."""
+class SmarterThermostat(ClimateEntity, RestoreEntity):
+    """Representation of a Smarter Thermostat device."""
 
     def __init__(
         self,
@@ -740,6 +795,31 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             tmp_dict[key] = data.get_variable_attr
         return {"hvac_def": tmp_dict, "room_area": self._area}
 
+    async def async_set_min_diff(self, hvac_mode, min_diff):
+        """Set new PID Controller min difference value."""
+        self._hvac_def[hvac_mode].set_min_difference(min_diff)
+        self.async_write_ha_state()
+
+    async def async_set_pid(self, hvac_mode, control_mode, kp=None, ki=None, kd=None):
+        """Set new PID Controller Kp value."""
+        self._hvac_def[hvac_mode].set_pid_param(control_mode, kp=kp, ki=ki, kd=kd)
+        self.async_write_ha_state()
+
+    async def async_set_integral(self, hvac_mode, control_mode, integral):
+        """Set new PID Controller integral value."""
+        self._hvac_def[hvac_mode].set_integral(control_mode, integral)
+        self.async_write_ha_state()
+
+    async def async_set_goal(self, hvac_mode, goal):
+        """Set new PID Controller integral value."""
+        self._hvac_def[hvac_mode].set_goal(goal)
+        self.async_write_ha_state()
+
+    async def async_set_ka_kb(self, hvac_mode, ka=None, kb=None):
+        """Set new PID Controller integral value."""
+        self._hvac_def[hvac_mode].set_ka_kb(ka=ka, kb=kb)
+        self.async_write_ha_state()
+
     async def async_set_hvac_mode(self, hvac_mode):
         """Set hvac mode."""
         # No changes have been made
@@ -839,7 +919,7 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             state.attributes.get("temperature"),
             state.attributes.get("current_temperature"),
             state.attributes.get("room_area"),
-            state.attributes.get("valve_pos"),
+            state.attributes.get("hvac_def")["heat"]["valve_pos"],
         )
 
     async def async_set_temperature(self, **kwargs):
@@ -952,30 +1032,26 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
     def _async_switch_device_changed(self, event):
         """Handle device switch state changes."""
         new_state = event.data.get("new_state")
-        old_state = event.data.get("old_state")
         entity_id = event.data.get("entity_id")
         _LOGGER.debug(
-            "Switch of %s changed from %s to %s",
+            "Switch of %s changed to %s",
             entity_id,
-            old_state.state,
             new_state.state,
         )
         if not self._hvac_on and new_state.state == "on":
             # thermostat off thus all switches off
 
             _LOGGER.warning(
-                "No swithces should be on in 'off'mode: switch of %s changed from %s to %s",
+                "No swithces should be on in 'off'mode: switch of %s changed to %s",
                 entity_id,
-                old_state.state,
                 new_state.state,
             )
 
         if self._hvac_on:
             if entity_id != self._hvac_on.get_hvac_switch:
                 _LOGGER.warning(
-                    "Wrong switch of %s changed from %s to %s",
+                    "Wrong switch of %s changed from %s",
                     entity_id,
-                    old_state.state,
                     new_state.state,
                 )
 
@@ -1096,9 +1172,13 @@ class GenericThermostat(ClimateEntity, RestoreEntity):
             # when mode is pwm
             else:
                 """calculate control output and handle autotune"""
-                self._hvac_on.update_temperatures(
+                self._hvac_on.set_current_temperature(
                     self._current_temperature,
+                )
+                self._hvac_on.set_target_temperature(
                     self._target_temp,
+                )
+                self._hvac_on.set_outdoor_temperature(
                     self._current_out_temperature,
                 )
 

@@ -52,7 +52,7 @@ class PIDController(object):
         self._integral = 0
         self._differential = 0
         self._windupguard = 1
-        self._diff_mov_avg = 60
+        self._diff_mov_avg = 4
         self._last_diff = 0
         self._last_input = 0
         self._last_output = 0
@@ -69,6 +69,9 @@ class PIDController(object):
         Returns:
             A value between `out_min` and `out_max`.
         """
+        if not setpoint or not input_val:
+            return self._last_output
+
         now = self._time()
         # _LOGGER.debug('pid timestamp: {0}'.format(self._last_calc_timestamp))
         if self._last_calc_timestamp != 0:
@@ -92,15 +95,16 @@ class PIDController(object):
         # In order to prevent windup, only integrate if the process is not saturated
         # if self._last_output < self._out_max and self._last_output > self._out_min:
         if self._last_calc_timestamp != 0:
-            self._integral += time_diff * error
-            self._integral = min(
-                self._integral,
-                self._out_max / (self._windupguard * self._Ki),
-            )
-            self._integral = max(
-                self._integral,
-                self._out_min / (self._windupguard * self._Ki),
-            )
+            if self._Ki:
+                self._integral += time_diff * error
+                self._integral = min(
+                    self._integral,
+                    self._out_max / (self._windupguard * abs(self._Ki)),
+                )
+                self._integral = max(
+                    self._integral,
+                    self._out_min / (self._windupguard * abs(self._Ki)),
+                )
 
             self._differential = (
                 (self._diff_mov_avg - 1) * self._last_diff + input_diff / time_diff
@@ -136,6 +140,15 @@ class PIDController(object):
     @property
     def get_integral(self):
         return self._integral
+
+    def set_pid_param(self, kp=None, ki=None, kd=None):
+        """Set PID parameters."""
+        if kp is not None:
+            self._Kp = kp
+        if ki is not None:
+            self._Ki = ki
+        if kd is not None:
+            self._Kd = kd
 
 
 # Based on a fork of Arduino PID AutoTune Library

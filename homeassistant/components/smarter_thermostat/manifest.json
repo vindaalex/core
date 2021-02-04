@@ -1,0 +1,8 @@
+{
+    "domain": "smarter_thermostat",
+    "name": "Smarter thermostat",
+    "documentation": "nowhere",
+    "requirements": [],
+    "dependencies": ["sensor", "switch"],
+    "codeowners": ["a.."]
+}

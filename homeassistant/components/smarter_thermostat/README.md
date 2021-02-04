@@ -2,12 +2,13 @@
 
 # custom_components/smarter_thermostat
 
-by borrowing and continuouing on code from:
-- fabian degger (PID thermostat) originator PID control in generic thermostat, repo not present anymore
-- aarmijo https://github.com/aarmijo/custom_components.git
-- osi https://github.com/osirisinferi/custom_components.git (fetch)
-- wout https://github.com/Wout-S/custom_components.git (fetch)
+by borrowing and continuouing on code from and thanx to:
 - DB-CL https://github.com/DB-CL/home-assistant/tree/new_generic_thermostat stale pull request with detailed seperation of hvac modes
+- fabian degger (PID thermostat) originator PID control in generic thermostat, https://github.com/aendle/custom_components
+- aarmijo https://github.com/aarmijo/custom_components
+- osi https://github.com/osirisinferi/custom_components
+- wout https://github.com/Wout-S/custom_components
+
 
 ## on-off and proportional controller thermostat
 
