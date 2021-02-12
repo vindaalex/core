@@ -69,8 +69,6 @@ from homeassistant.util import slugify
 
 from . import DOMAIN, PLATFORMS
 
-_LOGGER = logging.getLogger(__name__)
-
 DEFAULT_NAME = "Smarter Thermostat"
 DEFAULT_TARGET_TEMP_HEAT = 19.0
 DEFAULT_TARGET_TEMP_COOL = 28.0
@@ -83,13 +81,15 @@ DEFAULT_INITIAL_HVAC_MODE = HVAC_MODE_OFF
 DEFAULT_INITIAL_PRESET_MODE = PRESET_NONE
 
 DEFAULT_OLD_STATE = False
+DEFAULT_RESTORE_PARAMETERS = False
+DEFAULT_RESTORE_INTEGRAL = False
 
 # on_off mode
 DEFAULT_HYSTERESIS_TOLERANCE = 0.5
 
 # PWM/PID controller
 DEFAULT_DIFFERENCE = 100
-DEFAULT_MIN_DIFFERENCE = 5
+DEFAULT_MIN_PWM = 5
 DEFAULT_PWM = 0
 
 DEFAULT_AUTOTUNE = "none"
@@ -110,6 +110,8 @@ CONF_AWAY_TEMP = "away_temp"
 CONF_PRECISION = "precision"
 CONF_AREA = "room_area"
 CONF_ENABLE_OLD_STATE = "restore_from_old_state"
+CONF_ENABLE_OLD_PARAMETERS = "restore_parameters"
+CONF_ENABLE_OLD_INTEGRAL = "restore_integral"
 CONF_STALE_DURATION = "sensor_stale_duration"
 
 # on_off thermostat
@@ -124,7 +126,7 @@ CONF_PROPORTIONAL_MODE = "proportional_mode"
 CONF_PWM = "pwm"
 CONF_CONTROL_REFRESH_INTERVAL = "control_interval"
 CONF_DIFFERENCE = "difference"
-CONF_MIN_DIFFERENCE = "minimal_difference"
+CONF_MIN_PWM = "minimal_pwm"
 
 # proportional valve control (pid/pwm)
 SERVICE_SET_VALUE = "set_value"
@@ -278,6 +280,12 @@ PLATFORM_SCHEMA = vol.All(
                 cv.time_period, cv.positive_timedelta
             ),
             vol.Optional(CONF_ENABLE_OLD_STATE, default=DEFAULT_OLD_STATE): cv.boolean,
+            vol.Optional(
+                CONF_ENABLE_OLD_PARAMETERS, default=DEFAULT_RESTORE_PARAMETERS
+            ): cv.boolean,
+            vol.Optional(
+                CONF_ENABLE_OLD_INTEGRAL, default=DEFAULT_RESTORE_INTEGRAL
+            ): cv.boolean,
             vol.Optional(HVAC_MODE_HEAT): vol.Schema(
                 {
                     vol.Required(CONF_ENTITY_ID): cv.entity_id,
@@ -320,7 +328,7 @@ PLATFORM_SCHEMA = vol.All(
                                 CONF_DIFFERENCE, default=DEFAULT_DIFFERENCE
                             ): vol.Coerce(float),
                             vol.Optional(
-                                CONF_MIN_DIFFERENCE, default=DEFAULT_MIN_DIFFERENCE
+                                CONF_MIN_PWM, default=DEFAULT_MIN_PWM
                             ): vol.Coerce(float),
                             vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
                                 cv.time_period, cv.positive_timedelta
@@ -431,7 +439,7 @@ PLATFORM_SCHEMA = vol.All(
                                 CONF_DIFFERENCE, default=DEFAULT_DIFFERENCE
                             ): vol.Coerce(float),
                             vol.Optional(
-                                CONF_MIN_DIFFERENCE, default=DEFAULT_MIN_DIFFERENCE
+                                CONF_MIN_PWM, default=DEFAULT_MIN_PWM
                             ): vol.Coerce(float),
                             vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
                                 cv.time_period, cv.positive_timedelta
@@ -514,12 +522,12 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     assert platform
 
     platform.async_register_entity_service(  # type: ignore
-        "set_min_diff",
+        "min_pwm",
         {
             vol.Required("hvac_mode"): cv.string,
-            vol.Required("min_diff"): vol.Coerce(float),
+            vol.Required("min_pwm"): vol.Coerce(float),
         },
-        "async_set_min_diff",
+        "async_set_min_pwm",
     )
 
     platform.async_register_entity_service(  # type: ignore
@@ -550,7 +558,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
             vol.Required("hvac_mode"): cv.string,
             vol.Required("goal"): vol.Coerce(float),
         },
-        "async_set_integral",
+        "async_set_goal",
     )
     platform.async_register_entity_service(  # type: ignore
         "set_ka_kb",
@@ -572,6 +580,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     area = config.get(CONF_AREA)
     sensor_stale_duration = config.get(CONF_STALE_DURATION)
     enable_old_state = config.get(CONF_ENABLE_OLD_STATE)
+    enable_old_parameters = config.get(CONF_ENABLE_OLD_PARAMETERS)
+    enable_old_integral = config.get(CONF_ENABLE_OLD_INTEGRAL)
     heat_conf = config.get(HVAC_MODE_HEAT)
     cool_conf = config.get(HVAC_MODE_COOL)
 
@@ -581,10 +591,10 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     # Append the enabled hvac modes to the list
     if heat_conf:
         enabled_hvac_modes.append(HVAC_MODE_HEAT)
-        hvac_def["heat"] = hvac_setting.HVAC_Setting(HVAC_MODE_HEAT, heat_conf)
+        hvac_def["heat"] = hvac_setting.HVAC_Setting(name, HVAC_MODE_HEAT, heat_conf)
     if cool_conf:
         enabled_hvac_modes.append(HVAC_MODE_COOL)
-        hvac_def["cool"] = hvac_setting.HVAC_Setting(HVAC_MODE_COOL, cool_conf)
+        hvac_def["cool"] = hvac_setting.HVAC_Setting(name, HVAC_MODE_COOL, cool_conf)
 
     async_add_entities(
         [
@@ -600,6 +610,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
                 initial_hvac_mode,
                 initial_preset_mode,
                 enable_old_state,
+                enable_old_parameters,
+                enable_old_integral,
                 sensor_stale_duration,
             )
         ]
@@ -622,10 +634,13 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         initial_hvac_mode,
         initial_preset_mode,
         enable_old_state,
+        enable_old_parameters,
+        enable_old_integral,
         sensor_stale_duration,
     ):
         """Initialize the thermostat."""
         self._name = name
+        self._LOGGER = logging.getLogger(__name__).getChild(self._name)
         self._sensor_entity_id = sensor_entity_id
         self._temp_precision = precision
         self._unit = unit
@@ -634,14 +649,18 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         self._preset_mode = initial_preset_mode
         self._enabled_hvac_mode = enabled_hvac_modes
         self._enable_old_state = enable_old_state
+        self._restore_parameters = enable_old_parameters
+        self._restore_integral = enable_old_integral
         self._sensor_stale_duration = sensor_stale_duration
         self._area = area
         self._emergency_stop = False
         self._current_temperature = None
-        self._current_out_temperature = None
+        self._outdoor_temperature = None
         self._current_mode = "off"
         self._old_mode = "off"
         self._hvac_on = None
+        self._current_alive_time = None
+        self._satelites = None
 
         self._temp_lock = asyncio.Lock()
         if not self._sensor_entity_id:
@@ -675,9 +694,9 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
     async def async_added_to_hass(self):
         """Run when entity about to be added.
-
         Attach the listeners.
         """
+        self._LOGGER.info("init thermostat")
         await super().async_added_to_hass()
 
         # Add listeners to track changes from the sensor and the heater's switch
@@ -695,19 +714,6 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                         self.hass,
                         self._async_check_sensor_not_responding,
                         self._sensor_stale_duration,
-                    )
-                )
-
-        entity_list = []
-        for _, mode_def in self._hvac_def.items():
-            if mode_def.is_hvac_wc_mode:
-                entity_list.append(mode_def.get_wc_sensor)
-            if entity_list:
-                self.async_on_remove(
-                    async_track_state_change_event(
-                        self.hass,
-                        entity_list,
-                        self._async_sensor_out_temperature_changed,
                     )
                 )
 
@@ -746,11 +752,11 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         old_state = await self.async_get_last_state()
 
         if self._enable_old_state and old_state is not None:
-            _LOGGER.debug("Old state stored : %s", old_state)
+            self._LOGGER.debug("Old state stored : %s", old_state)
             old_preset_mode = old_state.attributes.get(ATTR_PRESET_MODE)
             old_hvac_mode = old_state.state
             old_temperature = old_state.attributes.get(ATTR_TEMPERATURE)
-            _LOGGER.debug(
+            self._LOGGER.debug(
                 "Old state preset mode %s, hvac mode %s, temperature %s",
                 old_preset_mode,
                 old_hvac_mode,
@@ -769,7 +775,9 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
                     for key, data in old_def.items():
                         if key in list(self._hvac_def.keys()):
-                            self._hvac_def[key].restore_reboot(data)
+                            self._hvac_def[key].restore_reboot(
+                                data, self._restore_parameters, self._restore_integral
+                            )
 
                 # Restore the target temperature
                 if self._hvac_on:
@@ -778,7 +786,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                         old_temperature is not None
                         and min_temp <= old_temperature <= max_temp
                     ):
-                        self._target_temp = old_temperature
+                        self._hvac_on.target_temperature = old_temperature
 
         # Set default state to off
         if not self._hvac_mode:
@@ -795,24 +803,28 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             tmp_dict[key] = data.get_variable_attr
         return {"hvac_def": tmp_dict, "room_area": self._area}
 
-    async def async_set_min_diff(self, hvac_mode, min_diff):
-        """Set new PID Controller min difference value."""
-        self._hvac_def[hvac_mode].set_min_difference(min_diff)
+    async def async_set_min_pwm(self, hvac_mode, min_pwm):
+        """Set new PID Controller min pwm value."""
+        self._hvac_def[hvac_mode].min_pwm(min_pwm)
         self.async_write_ha_state()
 
-    async def async_set_pid(self, hvac_mode, control_mode, kp=None, ki=None, kd=None):
+    async def async_set_pid(
+        self, hvac_mode, control_mode, kp=None, ki=None, kd=None, update=False
+    ):
         """Set new PID Controller Kp value."""
-        self._hvac_def[hvac_mode].set_pid_param(control_mode, kp=kp, ki=ki, kd=kd)
+        self._hvac_def[hvac_mode].set_pid_param(
+            control_mode, kp=kp, ki=ki, kd=kd, update=update
+        )
         self.async_write_ha_state()
 
     async def async_set_integral(self, hvac_mode, control_mode, integral):
         """Set new PID Controller integral value."""
-        self._hvac_def[hvac_mode].set_integral(control_mode, integral)
+        self._hvac_def[hvac_mode].integral(control_mode, integral)
         self.async_write_ha_state()
 
     async def async_set_goal(self, hvac_mode, goal):
         """Set new PID Controller integral value."""
-        self._hvac_def[hvac_mode].set_goal(goal)
+        self._hvac_def[hvac_mode].goal(goal)
         self.async_write_ha_state()
 
     async def async_set_ka_kb(self, hvac_mode, ka=None, kb=None):
@@ -826,9 +838,9 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         if self._hvac_mode == hvac_mode:
             return
         if hvac_mode not in self.hvac_modes:
-            _LOGGER.error("Unrecognized hvac mode: %s", hvac_mode)
+            self._LOGGER.error("Unrecognized hvac mode: %s", hvac_mode)
             return
-        _LOGGER.debug("HVAC mode changed to %s", hvac_mode)
+        self._LOGGER.debug("HVAC mode changed to %s", hvac_mode)
         self._hvac_mode = hvac_mode
 
         # stop autotune
@@ -838,8 +850,16 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             elif self._hvac_on.is_valve_autotune_active:
                 self._hvac_on.start_pid("valve")
 
-        # restore preset mode
-        self._preset_mode = PRESET_NONE
+            # restore preset mode
+            self._preset_mode = PRESET_NONE
+            # stop keep_live
+            self._current_alive_time = None
+            # stop tracking satelites
+            if self._hvac_on.is_master_mode:
+                # self._satelites = None
+                await self._async_track_satelites()
+            # stop listening to outdoor sensor
+            self._outdoor_sensors = None
 
         self._old_mode = self._current_mode
         if self._hvac_mode == HVAC_MODE_OFF:
@@ -849,70 +869,87 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         elif self._hvac_mode == HVAC_MODE_COOL:
             self._current_mode = "cool"
 
-        if self._hvac_mode == HVAC_MODE_OFF:
-            self._hvac_on = None
-        else:
-            self._hvac_on = self._hvac_def[self._current_mode]
-            self._target_temp = self._hvac_on.get_target_temp
-
         # new state thus all switches off
         for key, _ in self._hvac_def.items():
             await self._async_switch_turn_off(hvac_def=key)
+
         if self._hvac_mode == HVAC_MODE_OFF:
-            _LOGGER.debug("HVAC mode is OFF. Turn the devices OFF and exit")
+            self._LOGGER.debug("HVAC mode is OFF. Turn the devices OFF and exit")
+            self._hvac_on = None
             self.async_write_ha_state()
             return
+        else:
+            self._hvac_on = self._hvac_def[self._current_mode]
+            # self._target_temp = self._hvac_on.target_temperature
 
-        # update listener
-        await self._async_update_keep_alive()
-        if self._hvac_on.is_hvac_proportional_mode:
-            self.time_changed = time.time()
-        if self._hvac_on.is_hvac_pid_mode or self._hvac_on.is_hvac_valve_mode:
-            self._hvac_on.pid_reset_time
+            # update listener
+            await self._async_update_keep_alive(self._hvac_on.get_operate_cycle_time)
 
-        # start listener for satelite thermostats
-        if self._hvac_on.is_master_mode:
-            await self._async_track_satelites()
-            self._current_temperature = self._hvac_on.update_master_current_temp
-            self._target_temp = self._hvac_on.update_master_setpoint
-        await self._async_operate()
+            # reset pid to avoid integral run-off
+            if self._hvac_on.is_hvac_proportional_mode:
+                self.time_changed = time.time()
+            if self._hvac_on.is_hvac_pid_mode or self._hvac_on.is_hvac_valve_mode:
+                self._hvac_on.pid_reset_time
 
-        # Ensure we update the current operation after changing the mode
-        self.async_write_ha_state()
+            # start listening for outdoor sensors
+            if self._hvac_on.is_hvac_wc_mode:
+                await self._async_track_outdoor_sensors()
 
-    async def _async_update_keep_alive(self):
-        # remove_listener(self._async_operate)
-        if self._hvac_mode != HVAC_MODE_OFF:
-            _LOGGER.debug("update 'keep alive' for %s", self._hvac_mode)
-            keep_alive = None
-            keep_alive = self._hvac_on.get_keep_alive
-
-            if keep_alive:
-                self.async_on_remove(
-                    async_track_time_interval(
-                        self.hass, self._async_operate, keep_alive
-                    )
+            # start listener for satelite thermostats
+            if self._hvac_on.is_master_mode:
+                await self._async_track_satelites(
+                    entity_list=self._hvac_on.get_satelites
                 )
+                # self._current_temperature = self._hvac_on.update_master_current_temp
+            else:
+                self._hvac_on.current_temperature = self.current_temperature
+            if self.outdoor_temperature:
+                self._hvac_on.outdoor_temperature = self.outdoor_temperature
+            await self._async_operate()
 
-    async def _async_track_satelites(self):
-        # get changes from satelite thermostats
-        entity_list = self._hvac_on.get_satelites
+            # Ensure we update the current operation after changing the mode
+            self.async_write_ha_state()
+
+    async def _async_update_keep_alive(self, interval=None):
+        self._LOGGER.debug("update 'keep alive' for %s", self._hvac_mode)
+        if not interval:
+            self._current_alive_time = None
+        else:
+            self._current_alive_time = async_track_time_interval(
+                self.hass, self._async_operate, interval
+            )
+            self.async_on_remove(self._current_alive_time)
+
+    async def _async_track_outdoor_sensors(self):
+        """track outdoor sensors"""
+        self._outdoor_sensors = async_track_state_change_event(
+            self.hass,
+            self._hvac_on.get_wc_sensor,
+            self._async_sensor_outdoor_temperature_changed,
+        )
+        self.async_on_remove(self._outdoor_sensors)
+
+    async def _async_track_satelites(self, entity_list=None):
+        """get changes from satelite thermostats"""
+
         # sensor_state = self.hass.states.get(self._sensor_entity_id)
+        if not entity_list:
+            self._satelites()
+            return
+
         if entity_list:
             satelites = ["climate." + sub for sub in entity_list]
-            self.async_on_remove(
-                async_track_state_change_event(
-                    self.hass,
-                    satelites,
-                    self._async_satelite_thermostat_changed,
-                )
+
+            self._satelites = async_track_state_change_event(
+                self.hass, satelites, self._async_satelite_thermostat_changed
             )
+
             for satelite in satelites:
                 state = self.hass.states.get(satelite)
                 self._send_satelite(state)
 
     def _send_satelite(self, state):
-
+        """send satelite data to current hvac mode"""
         self._hvac_on.update_satelite(
             state.name,
             state.state,
@@ -932,7 +969,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         if hvac_mode is None:
             hvac_mode = self._hvac_mode
         elif hvac_mode not in self.hvac_modes:
-            _LOGGER.warning(
+            self._LOGGER.warning(
                 "Try to update temperature to %s for mode %s but this mode is not enabled",
                 temperature,
                 hvac_mode,
@@ -940,21 +977,23 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             return
 
         if hvac_mode is None or hvac_mode == HVAC_MODE_OFF:
-            _LOGGER.warning("You cannot update temperature for OFF mode")
+            self._LOGGER.warning("You cannot update temperature for OFF mode")
             return
 
-        _LOGGER.debug("Temperature updated to %s for mode %s", temperature, hvac_mode)
+        self._LOGGER.debug(
+            "Temperature updated to %s for mode %s", temperature, hvac_mode
+        )
 
         if (
             self.preset_mode == PRESET_AWAY
         ):  # when preset mode is away, change the temperature but do not operate
-            _LOGGER.debug(
+            self._LOGGER.debug(
                 "Preset mode away when temperature is updated : skipping operate"
             )
             return
 
-        self._hvac_on.set_target_temperature(temperature)
-        self._target_temp = temperature
+        self._hvac_on.target_temperature = temperature
+        # self._target_temp = temperature
 
         if not self._hvac_mode == HVAC_MODE_OFF:
             await self._async_operate(force=True)
@@ -964,7 +1003,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
     async def _async_sensor_temperature_changed(self, event):
         """Handle temperature changes."""
         new_state = event.data.get("new_state")
-        _LOGGER.debug("Sensor temperature updated to %s", new_state.state)
+        self._LOGGER.debug("Sensor temperature updated to %s", new_state.state)
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             await self._activate_emergency_stop()
             return
@@ -975,17 +1014,18 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         if not self._hvac_mode == HVAC_MODE_OFF:
             if self._hvac_on.is_hvac_on_off_mode:
                 await self._async_operate(sensor_changed=True)
+
         self.async_write_ha_state()
 
-    async def _async_sensor_out_temperature_changed(self, event):
+    async def _async_sensor_outdoor_temperature_changed(self, event):
         """Handle outdoor temperature changes."""
         new_state = event.data.get("new_state")
-        _LOGGER.debug("Sensor outdoor temperature updated to %s", new_state.state)
+        self._LOGGER.debug("Sensor outdoor temperature updated to %s", new_state.state)
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             await self._activate_emergency_stop()
             return
 
-        self._async_update_current_out_temp(new_state)
+        self._async_update_outdoor_temperature(new_state)
 
         # # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
         # if not self._hvac_mode == HVAC_MODE_OFF:
@@ -996,11 +1036,8 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
     async def _async_satelite_thermostat_changed(self, event):
         """Handle thermostat changes changes."""
         new_state = event.data.get("new_state")
-        _LOGGER.debug("thermostat %s updated ", new_state.name)
-
+        self._LOGGER.debug("thermostat %s updated ", new_state.name)
         self._send_satelite(new_state)
-        self._current_temperature = self._hvac_on.update_master_current_temp
-        self._target_temp = self._hvac_on.update_master_setpoint
 
         # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
         if not self._hvac_mode == HVAC_MODE_OFF:
@@ -1022,8 +1059,10 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                 datetime.datetime.now(datetime.timezone.utc) - sensor_state.last_updated
                 > self._sensor_stale_duration
             ):
-                _LOGGER.debug("Time is %s, last changed is %s, stale duration is %s")
-                _LOGGER.warning("Sensor is stalled, call the emergency stop")
+                self._LOGGER.debug(
+                    "Time is %s, last changed is %s, stale duration is %s"
+                )
+                self._LOGGER.warning("Sensor is stalled, call the emergency stop")
                 await self._activate_emergency_stop()
 
             return
@@ -1033,7 +1072,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         """Handle device switch state changes."""
         new_state = event.data.get("new_state")
         entity_id = event.data.get("entity_id")
-        _LOGGER.debug(
+        self._LOGGER.debug(
             "Switch of %s changed to %s",
             entity_id,
             new_state.state,
@@ -1041,7 +1080,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         if not self._hvac_on and new_state.state == "on":
             # thermostat off thus all switches off
 
-            _LOGGER.warning(
+            self._LOGGER.warning(
                 "No swithces should be on in 'off'mode: switch of %s changed to %s",
                 entity_id,
                 new_state.state,
@@ -1049,7 +1088,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
         if self._hvac_on:
             if entity_id != self._hvac_on.get_hvac_switch:
-                _LOGGER.warning(
+                self._LOGGER.warning(
                     "Wrong switch of %s changed from %s",
                     entity_id,
                     new_state.state,
@@ -1080,27 +1119,29 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
     def _async_update_current_temp(self, state):
         """Update thermostat with latest state from sensor."""
         try:
-            _LOGGER.debug("Current temperature updated to %s", float(state.state))
+            self._LOGGER.debug("Current temperature updated to %s", float(state.state))
             self._emergency_stop = False
+            # store local in case current hvac mode is off
             self._current_temperature = float(state.state)
             if self._hvac_on:
-                self._hvac_on.set_current_temperature(self._current_temperature)
+                self._hvac_on.current_temperature = float(state.state)
         except ValueError as ex:
-            _LOGGER.error("Unable to update from sensor: %s", ex)
+            self._LOGGER.error("Unable to update from sensor: %s", ex)
 
     @callback
-    def _async_update_current_out_temp(self, state):
+    def _async_update_outdoor_temperature(self, state):
         """Update thermostat with latest state from outdoor sensor."""
         try:
-            _LOGGER.debug(
+            self._LOGGER.debug(
                 "Current outdoor temperature updated to %s", float(state.state)
             )
             self._emergency_stop = False
-            self._current_out_temperature = float(state.state)
+            # store local in case current hvac mode is off
+            self._outdoor_temperature = float(state.state)
             if self._hvac_on:
-                self._hvac_on.set_outdoor_temperature(self._current_out_temperature)
+                self._hvac_on.outdoor_temperature = float(state.state)
         except ValueError as ex:
-            _LOGGER.error("Unable to update from outdoor sensor: %s", ex)
+            self._LOGGER.error("Unable to update from outdoor sensor: %s", ex)
 
     async def _async_operate(self, time=None, sensor_changed=False, force=False):
         """Check if we need to turn heating on or off."""
@@ -1110,22 +1151,25 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
             if self._emergency_stop:
                 if keepalive:
-                    _LOGGER.debug("Keepalive in emergency stop = resend emergency stop")
+                    self._LOGGER.debug(
+                        "Keepalive in emergency stop = resend emergency stop"
+                    )
                     await self._activate_emergency_stop()
                 else:
-                    _LOGGER.debug("Cannot operate in emergency stop state")
+                    self._LOGGER.debug("Cannot operate in emergency stop state")
                 return
 
-            if self._current_temperature is None:
-                _LOGGER.debug("Current temp is None, cannot compare with target")
-                return
             if not self._hvac_on:
                 return
+            if self._hvac_on.current_temperature is None:
+                self._LOGGER.debug("Current temp is None, cannot compare with target")
+                return
+
             # when mode is on_off
             # on_off is also true when pwm = 0 therefore != _is_pwm_active
             if self._hvac_on.is_hvac_on_off_mode:
                 # If the mode is OFF and the device is ON, turn it OFF and exit, else, just exit
-                min_cycle_duration = self._hvac_on.get_min_cycle
+                min_cycle_duration = self._hvac_on.get_min_on_off_cycle
                 tolerance_on, tolerance_off = self._hvac_on.get_hysteris
 
                 # if the call was made by a sensor change, check the min duration
@@ -1140,24 +1184,24 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                     )
 
                     if not long_enough:
-                        _LOGGER.debug(
+                        self._LOGGER.debug(
                             "Operate - Min duration not expired, exiting (%s, %s, %s)",
                             min_cycle_duration,
                             current_state,
                             entity_id,
                         )
                         return
+                target_temp = self._hvac_on.target_temperature
+                target_temp_min = target_temp - tolerance_on
+                target_temp_max = target_temp + tolerance_off
+                current_temp = self._hvac_on.current_temperature
 
-                target_temp_min = self._target_temp - tolerance_on
-                target_temp_max = self._target_temp + tolerance_off
-                current_temp = self._current_temperature
-
-                _LOGGER.debug(
+                self._LOGGER.debug(
                     "Operate - tg_min %s, tg_max %s, current %s, tg %s, ka %s",
                     target_temp_min,
                     target_temp_max,
                     current_temp,
-                    self.target_temperature,
+                    target_temp,
                     keepalive,
                 )
 
@@ -1172,15 +1216,15 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             # when mode is pwm
             else:
                 """calculate control output and handle autotune"""
-                self._hvac_on.set_current_temperature(
-                    self._current_temperature,
-                )
-                self._hvac_on.set_target_temperature(
-                    self._target_temp,
-                )
-                self._hvac_on.set_outdoor_temperature(
-                    self._current_out_temperature,
-                )
+                # self._hvac_on.current_temperature(
+                #     self._current_temperature,
+                # )
+                # self._hvac_on.target_temperature(
+                #     self._target_temp,
+                # )
+                # self._hvac_on.set_outdoor_temperature(
+                #     self._current_out_temperature,
+                # )
 
                 self._hvac_on.calculate(force)
                 # restore preset mode when autotune is off
@@ -1194,7 +1238,9 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                     self._preset_mode = PRESET_NONE
 
                 self.control_output = self._hvac_on.get_control_output
-                _LOGGER.info("Obtained current control output: %s", self.control_output)
+                self._LOGGER.info(
+                    "Obtained current control output: %s", self.control_output
+                )
                 await self._async_set_controlvalue()
 
     async def _async_set_controlvalue(self):
@@ -1211,14 +1257,14 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                     await self._async_switch_turn_on(force=force_resend)
 
                 self.time_changed = time.time()
-            elif self.control_output > self._hvac_on.get_min_difference:
+            elif self.control_output > self._hvac_on.min_pwm:
                 await self._async_pwm_switch(
                     pwm.seconds * self.control_output / difference,
                     pwm.seconds * (difference - self.control_output) / difference,
                     time.time() - self.time_changed,
                 )
             else:
-                if self._is_switch_active:
+                if self._is_switch_active():
                     await self._async_switch_turn_off(force=force_resend)
                     self.time_changed = time.time()
             # if heat_meter_entity_id:
@@ -1233,10 +1279,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             #         meter_attributes,
             #     )
         else:
-            if (
-                self._hvac_on.get_min_difference > self.control_output
-                and self._is_switch_active
-            ):
+            if self._hvac_on.min_pwm > self.control_output and self._is_switch_active():
                 await self._async_switch_turn_off(force=force_resend)
                 self.time_changed = time.time()
             else:
@@ -1248,7 +1291,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
         if self._is_switch_active():
             if time_on < time_passed:
-                _LOGGER.info(
+                self._LOGGER.info(
                     "Time exceeds 'on-time' by %s sec: turn off: %s",
                     entity_id,
                     round(time_on - time_passed, 0),
@@ -1257,12 +1300,12 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                 await self._async_switch_turn_off()
                 self.time_changed = time.time()
             else:
-                _LOGGER.info(
+                self._LOGGER.info(
                     "Time until %s turns off: %s sec", entity_id, time_on - time_passed
                 )
         else:
             if time_off < time_passed:
-                _LOGGER.info(
+                self._LOGGER.info(
                     "Time finshed 'off-time' by %s sec: turn on: %s",
                     entity_id,
                     round(time_passed - time_off, 0),
@@ -1271,26 +1314,26 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                 await self._async_switch_turn_on()
                 self.time_changed = time.time()
             else:
-                _LOGGER.info(
+                self._LOGGER.info(
                     "Time until %s turns on: %s sec", entity_id, time_off - time_passed
                 )
 
     async def _async_switch_turn_on(self, force=False):
         """Turn switch toggleable device on."""
-        _LOGGER.debug("Turn ON")
+        self._LOGGER.debug("Turn ON")
         entity_id = self._hvac_on.get_hvac_switch
         if self._hvac_on.is_hvac_switch_on_off:
             if self._is_switch_active() and not force:
-                _LOGGER.debug("Switch already ON")
+                self._LOGGER.debug("Switch already ON")
                 return
             data = {ATTR_ENTITY_ID: entity_id}
-            _LOGGER.debug("Order ON sent to switch device %s", entity_id)
+            self._LOGGER.debug("Order ON sent to switch device %s", entity_id)
             await self.hass.services.async_call(
                 HA_DOMAIN, SERVICE_TURN_ON, data, context=self._context
             )
         else:
             """valve mode"""
-            _LOGGER.info(
+            self._LOGGER.info(
                 "Change state of heater %s to %s",
                 entity_id,
                 self.control_output,
@@ -1305,7 +1348,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
     async def _async_switch_turn_off(self, hvac_def=None, force=False):
         """Turn toggleable device off."""
-        _LOGGER.debug("Turn OFF called")
+        self._LOGGER.debug("Turn OFF called")
         if hvac_def:
             _hvac_def = self._hvac_def[hvac_def]
         else:
@@ -1314,16 +1357,16 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
         if _hvac_def.is_hvac_switch_on_off:
             if not self._is_switch_active(hvac_def=hvac_def) and not force:
-                _LOGGER.debug("Switch already OFF")
+                self._LOGGER.debug("Switch already OFF")
                 return
             data = {ATTR_ENTITY_ID: entity_id}
-            _LOGGER.debug("Order OFF sent to switch device %s", entity_id)
+            self._LOGGER.debug("Order OFF sent to switch device %s", entity_id)
             await self.hass.services.async_call(
                 HA_DOMAIN, SERVICE_TURN_OFF, data, context=self._context
             )
         else:
             """valve mode"""
-            _LOGGER.info(
+            self._LOGGER.info(
                 "Change state of switch %s to %s",
                 entity_id,
                 0,
@@ -1335,38 +1378,23 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
     async def _activate_emergency_stop(self):
         """Send an emergency OFF order to HVAC devices."""
-        _LOGGER.warning("Emergency OFF order send to devices")
+        self._LOGGER.warning("Emergency OFF order send to devices")
         self._emergency_stop = True
         await self._async_switch_turn_off(force=True)
 
     async def async_set_preset_mode(self, preset_mode: str):
         """Set new preset mode.
-
         This method must be run in the event loop and returns a coroutine.
         """
         if preset_mode not in self.preset_modes and preset_mode != PRESET_NONE:
-            _LOGGER.error(
+            self._LOGGER.error(
                 "This preset (%s) is not enabled (see the configuration)", preset_mode
             )
             return
 
         self._preset_mode = preset_mode
-        _LOGGER.debug("Set preset mode to %s", preset_mode)
-
-        if self._preset_mode == PRESET_AWAY:
-            self._target_temp = self._hvac_on.get_away_temp
-        elif self._preset_mode == PRESET_PID_AUTOTUNE:
-            self._hvac_on.start_autotune("pid")
-        elif self._preset_mode == PRESET_VALVE_AUTOTUNE:
-            self._hvac_on.start_autotune("valve")
-        else:
-            if self._hvac_on.is_hvac_pid_mode and self._hvac_on.is_pid_autotune_active:
-                self._hvac_on.start_pid("pid")
-            if (
-                self._hvac_on.is_hvac_valve_mode
-                and self._hvac_on.is_valve_autotune_active
-            ):
-                self._hvac_on.start_pid("valve")
+        self._hvac_on.preset_mode = preset_mode
+        self._LOGGER.debug("Set preset mode to %s", preset_mode)
 
         await self._async_operate(force=True)
         self.async_write_ha_state()
@@ -1460,7 +1488,14 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
     @property
     def current_temperature(self):
         """Return the sensor temperature."""
-        return self._current_temperature
+        if self._hvac_mode == HVAC_MODE_OFF:
+            return None
+        return self._hvac_on.current_temperature
+
+    @property
+    def outdoor_temperature(self):
+        """Return the sensor temperature."""
+        return self._outdoor_temperature
 
     @property
     def hvac_mode(self):
@@ -1487,7 +1522,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         """Return the temperature we try to reach."""
         if self._hvac_mode == HVAC_MODE_OFF:
             return None
-        return self._target_temp
+        return self._hvac_on.target_temperature
 
     @property
     def hvac_modes(self):
