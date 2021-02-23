@@ -1,5 +1,6 @@
 import math
 import logging
+
 from time import time
 from collections import deque, namedtuple
 
@@ -29,6 +30,7 @@ class PIDController(object):
         out_min=float("-inf"),
         out_max=float("inf"),
         time=time,
+        derative_avg=None,
     ):
         if kp is None:
             raise ValueError("kp must be specified")
@@ -58,6 +60,7 @@ class PIDController(object):
         self._last_output = 0
         self._last_calc_timestamp = 0
         self._time = time
+        self._averaging = derative_avg
 
     def calc(self, input_val, setpoint, force=False):
         """Adjusts and holds the given setpoint.
@@ -77,7 +80,7 @@ class PIDController(object):
         if self._last_calc_timestamp != 0:
             # self._LOGGER.debug('pid timediff: now {0} - last {0} < sampletime {0}'.format(now,self._last_calc_timestamp,self._sampletime))
             if (now - self._last_calc_timestamp) < self._sampletime and not force:
-                self._LOGGER.info(
+                self._LOGGER.debug(
                     "pid timediff: {0} < sampletime {1}: keep previous value".format(
                         round((now - self._last_calc_timestamp), 0),
                         self._sampletime,
@@ -106,13 +109,16 @@ class PIDController(object):
                     self._out_min / (self._windupguard * abs(self._Ki)),
                 )
 
-            self._differential = (
-                (self._diff_mov_avg - 1) * self._last_diff + input_diff / time_diff
-            ) / self._diff_mov_avg
+            # if self._averaging:
+            #     self._differential = (
+            #         (self._averaging - time_diff) * self._last_diff + input_diff
+            #     ) / self._averaging
+            # else:
+            self._differential = input_diff / time_diff
 
         p = self._Kp * error
         i = self._Ki * self._integral
-        d = -(self._Kd * self._differential)
+        d = self._Kd * self._differential
 
         # Compute PID Output
         self._last_output = p + i + d

@@ -2,7 +2,7 @@
     "domain": "smarter_thermostat",
     "name": "Smarter thermostat",
     "documentation": "nowhere",
-    "requirements": [],
+    "requirements": ["numpy==1.20.0","filterpy==1.4.4"],
     "dependencies": ["sensor", "switch"],
     "codeowners": ["a.."]
 }
