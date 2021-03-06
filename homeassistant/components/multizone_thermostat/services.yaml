@@ -1,5 +1,5 @@
 reload:
-  description: Reload all smarter_thermostat entities.
+  description: Reload all multizone_thermostat entities.
 
 #proportional
 set_min_diff:

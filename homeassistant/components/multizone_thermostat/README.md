@@ -1,10 +1,11 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://github.com/custom-components/hacs)
 
-# custom_components/smarter_thermostat
+# custom_components/multizone_thermostat
 
 by borrowing and continuouing on code from and thanx to:
 - DB-CL https://github.com/DB-CL/home-assistant/tree/new_generic_thermostat stale pull request with detailed seperation of hvac modes
 - fabian degger (PID thermostat) originator PID control in generic thermostat, https://github.com/aendle/custom_components
+some changes to the PID controller:
 - aarmijo https://github.com/aarmijo/custom_components
 - osi https://github.com/osirisinferi/custom_components
 - wout https://github.com/Wout-S/custom_components
@@ -14,9 +15,10 @@ by borrowing and continuouing on code from and thanx to:
 1. Go to <conf-dir> default /homeassistant/.homeassistant/ (it's where your configuration.yaml is)
 2. Create <conf-dir>/custom_components/ directory if it does not already exist
 3. Clone this repository content into <conf-dir>/custom_components/
-4. Set up the smarter_thermostat and have fun
+4. Reboot HA without any configuration using the code to install requirements
+5. Set up the multizone_thermostat and have fun
 
-# on-off and proportional controller thermostat
+# multi zone on-off and proportional controller thermostat
 
 ## Control modes:
 ### on-off:
@@ -38,6 +40,20 @@ The control is based on NC actuators
 
 heat mode: Kp & Ki positive, Kd negative
 cool mode: Kp & Ki negative, Kd positive
+
+examples:
+
+slow low temperature underfloor heating:
+    PID_mode:
+      kp: 30
+      ki: 0.005
+      kd: -24000
+
+high temperature radiator:
+      PID_mode:
+        kp: 80
+        ki: 0.09
+        kd: -5000
 
 Initial parameter and backgroud info:
 * Cohen-Coon Tuning Rules P/PI/PID https://blog.opticontrols.com/archives/383
@@ -70,7 +86,7 @@ cool mode: ka negitive, kb positive
 
 
 ### master mode:
-With this mode a zoned heating system an be created. Controlled rooms (satelites) can be linked to a master. The setpoint, room temperature and valve position will be read from the satelites and are averaged based on the room area. This mode can be run in combination with PID and Linear mode and in addition a satelite valve position PID controller is present. The satelite valve PID controller is defeind under master config
+With this mode a multizone heating system an be created. Controlled rooms (satelites) can be linked to a master. The setpoint, room temperature and valve position will be read from the satelites and are averaged based on the room area. This mode can be run in combination with PID and Linear mode and in addition a satelite valve position PID controller is present. The satelite valve PID controller is defeind under master config
 
 The valve control is based on NC actuators
 
@@ -88,11 +104,12 @@ To save the parameters read the climate entity attributes, and copy the values t
 ## main:
 * name (Required): Name of thermostat.
 * target_sensor (optional): entity_id for a temperature sensor, target_sensor.state must be temperature. Not required when running in master mode: satelites are used.
+* sensor_out (optional): entity_id for a outdoor temperature sensor, sensor_out.state must be temperature. Only required when running weather mode.
 * initial_hvac_mode (Optional): Set the initial operation mode. Valid values are off or cool or heat. Default is off
 * initial_preset_mode (Optional): Set the default mode. Default is None
 * precision (Optional): specifiy precision of system: 0.1, 0.5 or 1
 * unique_id (Optional): specify name for entity in registry else unique name is based on specified sensors and switches
-* room_area (Optional): ratio (room area) for averiging thermostat when used as satelite with other satelites. Default is 0
+* room_area (Optional): ratio (room area) for averiging thermostat when required when operating as satelite. Default is 0
 * sensor_stale_duration (Optional): safety to turn switches of when sensor has not updated wthin specified period. Default no check
 * restore_from_old_state (Optional): restore certain old configuration and modes after restart. (setpoints, KP,KI,PD values, modes). Default is False
 * restore_parameters (Optional): specify if previous controller parameters need to be restored. Default is false
@@ -117,15 +134,15 @@ with the data (as sub):
 * hysteresis_tolerance_off (Optional): temperature offset to switch off. default is 0.5
 * min_cycle_duration (Optional): Min duration to change switch status. If this is not specified, min_cycle_duration feature will not get activated.
 * keep_alive (Optional): Min duration to re-run an update cycle. If this is not specified, feature will not get activated.
-* min_cycle_duration (Optional): Min duration to keep switch state. If this is not specified, feature will not get activated.
+
 
 #### proportional mode:
 proportional_mode: (Optional) (sub of hvac mode)
 with the data (as sub):
-* pwm (Optional): Set period time for pwm signal in seconds. If it's not set, pwm is sending proportional value to switch. Default = 0
-* minimal_pwm (Optional): Set the minimal difference before activating swtich. To avoid very short off-on-off changes. Default is off
-* difference (Optional): Set analog output offset to 0 (default 100). Example: If it's 500 the output Value can be everything between 0 and 500.
 * control_interval (Required): interval that controller is updated.
+* minimal_diff (Optional): Set the minimal difference before activating swtich. To avoid very short off-on-off changes. Default is off
+* difference (Optional): Set analog output offset to 0 (default 100). Example: If it's 500 the output Value can be everything between 0 and 500.
+* pwm (Optional): Set period time for pwm signal in seconds. If it's not set, pwm is sending proportional value to switch. Default = 0
 
 controller modes: (PID, Linear, Master)
 
@@ -136,7 +153,6 @@ with the data (as sub):
 * kp (Required): Set PID parameter, p control value.
 * ki (Required): Set PID parameter, i control value.
 * kd (Required): Set PID parameter, d control value.
-* derative_avg (Optional): time period to average the temperature velocity change. Default no averaging
 * min_diff (Optional): Overide global minimum output. Default varies with chosen settings.
 * max_diff (Optional): Overide global maximum output. Default = 'difference'
 * For autotune parameters see section 'autotune'
@@ -147,7 +163,6 @@ Linear controller (sub of proportional mode)
 with the data (as sub):
 * ka (Required): Set PID parameter, ka control value.
 * kb (Required): Set PID parameter, kb control value.
-* min_diff (Optional): Overide global minimum output. Default varies with chosen settings.
 * max_diff (Optional): Overide global maximum output. Default = 'difference'
 
 ##### zone/valve controller:
@@ -194,7 +209,7 @@ tuning rules and sets the Ziegler-Nichols control type     according to: https:/
 on-off mode - heat only
 ```
 climate:
-  - platform: smarter_thermostat
+  - platform: multizone_thermostat
     name: satelite1
     sensor: sensor.fake_sensor_1
     initial_hvac_mode: "off"
@@ -225,7 +240,7 @@ on-off mode - heat on and cool
 
 ```
 climate:
-  - platform: smarter_thermostat
+  - platform: multizone_thermostat
     name: satelite1
     sensor: sensor.fake_sensor_1
     initial_hvac_mode: "off"
@@ -269,7 +284,7 @@ proportional mode
 
 ```
 climate:
-  - platform: smarter_thermostat
+  - platform: multizone_thermostat
     name: satelite1
     sensor: sensor.fake_sensor_1
     initial_hvac_mode: "off"

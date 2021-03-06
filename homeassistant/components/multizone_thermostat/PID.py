@@ -1,5 +1,6 @@
 import math
 import logging
+import numpy as np
 
 from time import time
 from collections import deque, namedtuple
@@ -23,6 +24,7 @@ class PIDController(object):
     def __init__(
         self,
         logger,
+        PID_type,
         sampletime,
         kp,
         ki,
@@ -43,7 +45,7 @@ class PIDController(object):
         if out_min >= out_max:
             raise ValueError("out_min must be less than out_max")
 
-        self._LOGGER = logger
+        self._LOGGER = logging.getLogger(logger).getChild(PID_type)
         self._Kp = kp
         self._Ki = ki
         self._Kd = kd
@@ -54,8 +56,6 @@ class PIDController(object):
         self._integral = 0
         self._differential = 0
         self._windupguard = 1
-        self._diff_mov_avg = 4
-        self._last_diff = 0
         self._last_input = 0
         self._last_output = 0
         self._last_calc_timestamp = 0
@@ -72,13 +72,16 @@ class PIDController(object):
         Returns:
             A value between `out_min` and `out_max`.
         """
-        if not setpoint or not input_val:
+        if not setpoint:
+            self._LOGGER.warning(
+                "no setpoint specified, return with previous control value {0}".format(
+                    self._last_output
+                )
+            )
             return self._last_output
 
         now = self._time()
-        # self._LOGGER.debug('pid timestamp: {0}'.format(self._last_calc_timestamp))
         if self._last_calc_timestamp != 0:
-            # self._LOGGER.debug('pid timediff: now {0} - last {0} < sampletime {0}'.format(now,self._last_calc_timestamp,self._sampletime))
             if (now - self._last_calc_timestamp) < self._sampletime and not force:
                 self._LOGGER.debug(
                     "pid timediff: {0} < sampletime {1}: keep previous value".format(
@@ -87,13 +90,35 @@ class PIDController(object):
                     )
                 )
                 return self._last_output
+            time_diff = now - self._last_calc_timestamp
+
+        if isinstance(input_val, (list, tuple, np.ndarray)):
+            current_temp, self._differential = input_val
+            self._LOGGER.debug(
+                "current temp {0} ; current velocity {1}".format(
+                    current_temp,
+                    self._differential,
+                )
+            )
+            if self._differential < -0.001:
+                self._LOGGER.warning("open window detected, maintain old control value")
+                return self._last_output
+        else:
+            # this is only triggered for master mode, velocity is less stable and open window check not required.
+            if not input_val:
+                self._LOGGER.warning(
+                    "no current value specified, return with previous control value {0}".format(
+                        self._last_output
+                    )
+                )
+                return self._last_output
+            current_temp = input_val
+            if self._last_calc_timestamp != 0:
+                input_diff = current_temp - self._last_input
+                self._differential = input_diff / time_diff
 
         # Compute all the working error variables
-        error = setpoint - input_val
-        input_diff = input_val - self._last_input
-
-        if self._last_calc_timestamp != 0:
-            time_diff = now - self._last_calc_timestamp
+        error = setpoint - current_temp
 
         # In order to prevent windup, only integrate if the process is not saturated
         # if self._last_output < self._out_max and self._last_output > self._out_min:
@@ -108,13 +133,6 @@ class PIDController(object):
                     self._integral,
                     self._out_min / (self._windupguard * abs(self._Ki)),
                 )
-
-            # if self._averaging:
-            #     self._differential = (
-            #         (self._averaging - time_diff) * self._last_diff + input_diff
-            #     ) / self._averaging
-            # else:
-            self._differential = input_diff / time_diff
 
         p = self._Kp * error
         i = self._Ki * self._integral
@@ -133,7 +151,6 @@ class PIDController(object):
 
         # Remember some variables for next time
         self._last_input = input_val
-        self._last_diff = self._differential
         self._last_calc_timestamp = now
         return self._last_output
 
@@ -146,8 +163,12 @@ class PIDController(object):
 
     @integral.setter
     def integral(self, integral):
-        self._LOGGER.info("new integral: {0}".format(integral))
+        self._LOGGER.info("forcing new integral: {0}".format(integral))
         self._integral = integral
+
+    @property
+    def differential(self):
+        return self._differential
 
     def set_pid_param(self, kp=None, ki=None, kd=None):
         """Set PID parameters."""
@@ -200,6 +221,7 @@ class PIDAutotune(object):
     def __init__(
         self,
         logger,
+        PID_type,
         setpoint,
         out_step=10,
         sampletime=5,
@@ -221,7 +243,7 @@ class PIDAutotune(object):
             raise ValueError("out_min must be less than out_max")
 
         self._time = time
-        self._LOGGER = logger
+        self._LOGGER = logging.getLogger(logger).getChild(PID_type)
         self._inputs = deque(maxlen=round(lookback / sampletime))
         self._sampletime = sampletime
         self._setpoint = setpoint

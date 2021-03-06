@@ -1,10 +1,12 @@
-"""Smarter thermostat.
-Incl support for smart (PID) thermostat units.
-For more details about this platform, please refer to the documentation at
-
-to do:
-- check async functions
--
+"""MultiZone thermostat.
+Incl support for:
+- multizone heating
+- UKF filter on sensor
+- various controllers:
+    - temperature: PID
+    - outdoor temperature: weather
+    - valve position: PID
+For more details about this platform, please refer to the README
 """
 
 import asyncio
@@ -12,12 +14,6 @@ import logging
 import datetime
 from typing import Callable, Dict
 import time
-import numpy as np
-from filterpy.kalman import UnscentedKalmanFilter
-from filterpy.common import Q_discrete_white_noise
-from filterpy.kalman import JulierSigmaPoints, MerweScaledSigmaPoints
-
-from . import hvac_setting
 
 import voluptuous as vol
 
@@ -72,20 +68,10 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import slugify
 
 from . import DOMAIN, PLATFORMS
+from . import hvac_setting
+from . import UKF_filter
 
-
-def fx(x, dt):
-    xout = np.empty_like(x)
-    xout[0] = x[1] * dt + x[0]
-    xout[1] = x[1]
-    return xout
-
-
-def hx(x):
-    return x[:1]  # return position [x]
-
-
-DEFAULT_NAME = "Smarter Thermostat"
+# DEFAULT_NAME = "MultiZone Thermostat"
 DEFAULT_TARGET_TEMP_HEAT = 19.0
 DEFAULT_TARGET_TEMP_COOL = 28.0
 DEFAULT_MAX_TEMP_HEAT = 24
@@ -274,6 +260,94 @@ def check_presets_in_both_modes(*keys: str) -> Callable:
     return validate
 
 
+PID_control_options = {
+    vol.Required(CONF_KP): vol.Coerce(float),
+    vol.Required(CONF_KI): vol.Coerce(float),
+    vol.Required(CONF_KD): vol.Coerce(float),
+    vol.Optional(CONF_MIN_DIFFERENCE): vol.Coerce(float),
+    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(float),
+    vol.Optional(CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE): cv.string,
+    vol.Optional(
+        CONF_AUTOTUNE_CONTROL_TYPE,
+        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
+    ): cv.string,
+    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
+        cv.time_period, cv.positive_timedelta
+    ),
+    vol.Optional(
+        CONF_AUTOTUNE_STEP_SIZE,
+        default=DEFAULT_STEP_SIZE,
+    ): vol.Coerce(float),
+    vol.Optional(CONF_NOISEBAND, default=DEFAULT_NOISEBAND): vol.Coerce(float),
+}
+
+hvac_control_options = {
+    vol.Required(CONF_ENTITY_ID): cv.entity_id,
+    vol.Required(CONF_HVAC_MODE_MIN_TEMP, default=DEFAULT_MIN_TEMP_HEAT): vol.Coerce(
+        float
+    ),
+    vol.Required(CONF_HVAC_MODE_MAX_TEMP, default=DEFAULT_MAX_TEMP_HEAT): vol.Coerce(
+        float
+    ),
+    vol.Required(
+        CONF_HVAC_MODE_INIT_TEMP, default=DEFAULT_TARGET_TEMP_HEAT
+    ): vol.Coerce(float),
+    vol.Optional(CONF_AWAY_TEMP): vol.Coerce(float),
+    # on_off
+    vol.Optional(CONF_ON_OFF_MODE): vol.Schema(
+        {
+            vol.Optional(
+                CONF_HYSTERESIS_TOLERANCE_ON,
+                default=DEFAULT_HYSTERESIS_TOLERANCE,
+            ): vol.Coerce(float),
+            vol.Optional(
+                CONF_HYSTERESIS_TOLERANCE_OFF,
+                default=DEFAULT_HYSTERESIS_TOLERANCE,
+            ): vol.Coerce(float),
+            vol.Optional(CONF_MIN_CYCLE_DURATION): vol.All(
+                cv.time_period, cv.positive_timedelta
+            ),
+            vol.Optional(CONF_KEEP_ALIVE): vol.All(
+                cv.time_period, cv.positive_timedelta
+            ),
+        }
+    ),
+    # proportional mode"
+    vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema(
+        {
+            vol.Required(CONF_CONTROL_REFRESH_INTERVAL): vol.All(
+                cv.time_period, cv.positive_timedelta
+            ),
+            vol.Optional(CONF_DIFFERENCE, default=DEFAULT_DIFFERENCE): vol.Coerce(
+                float
+            ),
+            vol.Optional(CONF_MIN_DIFF, default=DEFAULT_MIN_DIFF): vol.Coerce(float),
+            vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
+                cv.time_period, cv.positive_timedelta
+            ),
+            # PID mode
+            vol.Optional(CONF_PID_MODE): vol.Schema(PID_control_options),
+            # weather compensating mode"
+            vol.Optional(CONF_WC_MODE): vol.Schema(
+                {
+                    vol.Required(CONF_KA): vol.Coerce(float),
+                    vol.Required(CONF_KB): vol.Coerce(float),
+                    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(float),
+                }
+            ),
+            # master mode"
+            vol.Optional(CONF_MASTER_MODE): vol.Schema(
+                {
+                    vol.Required(CONF_SATELITES): cv.ensure_list,
+                    vol.Optional(CONF_GOAL): vol.Coerce(float),
+                },
+                PID_control_options,
+            ),
+        }
+    ),
+}
+
+
 PLATFORM_SCHEMA = vol.All(
     cv.has_at_least_one_key(HVAC_MODE_HEAT, HVAC_MODE_COOL),
     validate_initial_hvac_mode(),
@@ -282,9 +356,9 @@ PLATFORM_SCHEMA = vol.All(
     validate_initial_control_mode(),
     PLATFORM_SCHEMA.extend(
         {
+            vol.Required(CONF_NAME): cv.string,
             vol.Optional(CONF_SENSOR): cv.entity_id,
             vol.Optional(CONF_SENSOR_OUT): cv.entity_id,
-            vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
             vol.Optional(
                 CONF_INITIAL_HVAC_MODE, default=DEFAULT_INITIAL_HVAC_MODE
             ): vol.In(SUPPORTED_HVAC_MODES),
@@ -306,275 +380,15 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(
                 CONF_ENABLE_OLD_INTEGRAL, default=DEFAULT_RESTORE_INTEGRAL
             ): cv.boolean,
-            vol.Optional(HVAC_MODE_HEAT): vol.Schema(
-                {
-                    vol.Required(CONF_ENTITY_ID): cv.entity_id,
-                    vol.Required(
-                        CONF_HVAC_MODE_MIN_TEMP, default=DEFAULT_MIN_TEMP_HEAT
-                    ): vol.Coerce(float),
-                    vol.Required(
-                        CONF_HVAC_MODE_MAX_TEMP, default=DEFAULT_MAX_TEMP_HEAT
-                    ): vol.Coerce(float),
-                    vol.Required(
-                        CONF_HVAC_MODE_INIT_TEMP, default=DEFAULT_TARGET_TEMP_HEAT
-                    ): vol.Coerce(float),
-                    vol.Optional(CONF_AWAY_TEMP): vol.Coerce(float),
-                    # on_off
-                    vol.Optional(CONF_ON_OFF_MODE): vol.Schema(
-                        {
-                            vol.Optional(
-                                CONF_HYSTERESIS_TOLERANCE_ON,
-                                default=DEFAULT_HYSTERESIS_TOLERANCE,
-                            ): vol.Coerce(float),
-                            vol.Optional(
-                                CONF_HYSTERESIS_TOLERANCE_OFF,
-                                default=DEFAULT_HYSTERESIS_TOLERANCE,
-                            ): vol.Coerce(float),
-                            vol.Optional(CONF_MIN_CYCLE_DURATION): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                            vol.Optional(CONF_KEEP_ALIVE): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                        }
-                    ),
-                    # proportional mode"
-                    vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema(
-                        {
-                            vol.Required(CONF_CONTROL_REFRESH_INTERVAL): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                            vol.Optional(
-                                CONF_DIFFERENCE, default=DEFAULT_DIFFERENCE
-                            ): vol.Coerce(float),
-                            vol.Optional(
-                                CONF_MIN_DIFF, default=DEFAULT_MIN_DIFF
-                            ): vol.Coerce(float),
-                            vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                            # PID mode
-                            vol.Optional(CONF_PID_MODE): vol.Schema(
-                                {
-                                    vol.Required(CONF_KP): vol.Coerce(float),
-                                    vol.Required(CONF_KI): vol.Coerce(float),
-                                    vol.Required(CONF_KD): vol.Coerce(float),
-                                    vol.Optional(CONF_MIN_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(CONF_D_AVG, default=0.0): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
-                                    ): cv.string,
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_CONTROL_TYPE,
-                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
-                                    ): cv.string,
-                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_STEP_SIZE,
-                                        default=DEFAULT_STEP_SIZE,
-                                    ): vol.Coerce(float),
-                                    vol.Optional(
-                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
-                                    ): vol.Coerce(float),
-                                }
-                            ),
-                            # weather compensating mode"
-                            vol.Optional(CONF_WC_MODE): vol.Schema(
-                                {
-                                    vol.Required(CONF_KA): vol.Coerce(float),
-                                    vol.Required(CONF_KB): vol.Coerce(float),
-                                    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                }
-                            ),
-                            # master mode"
-                            vol.Optional(CONF_MASTER_MODE): vol.Schema(
-                                {
-                                    vol.Required(CONF_SATELITES): cv.ensure_list,
-                                    vol.Optional(CONF_GOAL): vol.Coerce(float),
-                                    vol.Optional(CONF_KP): vol.Coerce(float),
-                                    vol.Optional(CONF_KI): vol.Coerce(float),
-                                    vol.Optional(CONF_KD): vol.Coerce(float),
-                                    vol.Optional(CONF_D_AVG, default=0.0): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(CONF_MIN_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
-                                    ): cv.string,
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_CONTROL_TYPE,
-                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
-                                    ): cv.string,
-                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_STEP_SIZE,
-                                        default=DEFAULT_STEP_SIZE,
-                                    ): vol.Coerce(float),
-                                    vol.Optional(
-                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
-                                    ): vol.Coerce(float),
-                                }
-                            ),
-                        }
-                    ),
-                }
-            ),
-            vol.Optional(HVAC_MODE_COOL): vol.Schema(
-                {
-                    vol.Required(CONF_ENTITY_ID): cv.entity_id,
-                    vol.Required(
-                        CONF_HVAC_MODE_MIN_TEMP, default=DEFAULT_MIN_TEMP_COOL
-                    ): vol.Coerce(float),
-                    vol.Required(
-                        CONF_HVAC_MODE_MAX_TEMP, default=DEFAULT_MAX_TEMP_COOL
-                    ): vol.Coerce(float),
-                    vol.Required(
-                        CONF_HVAC_MODE_INIT_TEMP, default=DEFAULT_TARGET_TEMP_COOL
-                    ): vol.Coerce(float),
-                    vol.Optional(CONF_AWAY_TEMP): vol.Coerce(float),
-                    # on_off
-                    vol.Optional(CONF_ON_OFF_MODE): vol.Schema(
-                        {
-                            vol.Optional(
-                                CONF_HYSTERESIS_TOLERANCE_ON,
-                                default=DEFAULT_HYSTERESIS_TOLERANCE,
-                            ): vol.Coerce(float),
-                            vol.Optional(
-                                CONF_HYSTERESIS_TOLERANCE_OFF,
-                                default=DEFAULT_HYSTERESIS_TOLERANCE,
-                            ): vol.Coerce(float),
-                            vol.Optional(CONF_MIN_CYCLE_DURATION): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                            vol.Optional(CONF_KEEP_ALIVE): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                        }
-                    ),
-                    # proportional mode"
-                    vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema(
-                        {
-                            vol.Required(CONF_CONTROL_REFRESH_INTERVAL): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                            vol.Optional(
-                                CONF_DIFFERENCE, default=DEFAULT_DIFFERENCE
-                            ): vol.Coerce(float),
-                            vol.Optional(
-                                CONF_MIN_DIFF, default=DEFAULT_MIN_DIFF
-                            ): vol.Coerce(float),
-                            vol.Optional(CONF_PWM, default=DEFAULT_PWM): vol.All(
-                                cv.time_period, cv.positive_timedelta
-                            ),
-                            # PID mode
-                            vol.Optional(CONF_PID_MODE): vol.Schema(
-                                {
-                                    vol.Required(CONF_KP): vol.Coerce(float),
-                                    vol.Required(CONF_KI): vol.Coerce(float),
-                                    vol.Required(CONF_KD): vol.Coerce(float),
-                                    vol.Optional(CONF_D_AVG, default=0.0): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(CONF_MIN_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
-                                    ): cv.string,
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_CONTROL_TYPE,
-                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
-                                    ): cv.string,
-                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_STEP_SIZE,
-                                        default=DEFAULT_STEP_SIZE,
-                                    ): vol.Coerce(float),
-                                    vol.Optional(
-                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
-                                    ): vol.Coerce(float),
-                                }
-                            ),
-                            # weather compensating mode"
-                            vol.Optional(CONF_WC_MODE): vol.Schema(
-                                {
-                                    vol.Required(CONF_KA): vol.Coerce(float),
-                                    vol.Required(CONF_KB): vol.Coerce(float),
-                                    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                }
-                            ),
-                            # master mode"
-                            vol.Optional(CONF_MASTER_MODE): vol.Schema(
-                                {
-                                    vol.Required(CONF_SATELITES): cv.ensure_list,
-                                    vol.Optional(CONF_GOAL): vol.Coerce(float),
-                                    vol.Optional(CONF_KP): vol.Coerce(float),
-                                    vol.Optional(CONF_KI): vol.Coerce(float),
-                                    vol.Optional(CONF_KD): vol.Coerce(float),
-                                    vol.Optional(CONF_D_AVG, default=0.0): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(CONF_MIN_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(CONF_MAX_DIFFERENCE): vol.Coerce(
-                                        float
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE, default=DEFAULT_AUTOTUNE
-                                    ): cv.string,
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_CONTROL_TYPE,
-                                        default=DEFAULT_AUTOTUNE_CONTROL_TYPE,
-                                    ): cv.string,
-                                    vol.Optional(CONF_AUTOTUNE_LOOKBACK): vol.All(
-                                        cv.time_period, cv.positive_timedelta
-                                    ),
-                                    vol.Optional(
-                                        CONF_AUTOTUNE_STEP_SIZE,
-                                        default=DEFAULT_STEP_SIZE,
-                                    ): vol.Coerce(float),
-                                    vol.Optional(
-                                        CONF_NOISEBAND, default=DEFAULT_NOISEBAND
-                                    ): vol.Coerce(float),
-                                }
-                            ),
-                        }
-                    ),
-                }
-            ),
+            vol.Optional(HVAC_MODE_HEAT): vol.Schema(hvac_control_options),
+            vol.Optional(HVAC_MODE_COOL): vol.Schema(hvac_control_options),
         }
     ),
 )
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up the smarter thermostat platform."""
+    """Set up the multizone thermostat platform."""
 
     await async_setup_reload_service(hass, DOMAIN, PLATFORMS)
 
@@ -652,14 +466,16 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     # Append the enabled hvac modes to the list
     if heat_conf:
         enabled_hvac_modes.append(HVAC_MODE_HEAT)
-        hvac_def["heat"] = hvac_setting.HVAC_Setting(name, HVAC_MODE_HEAT, heat_conf)
+        hvac_def[HVAC_MODE_HEAT] = heat_conf
+        # hvac_def["heat"] = hvac_setting.HVAC_Setting(name, HVAC_MODE_HEAT, heat_conf)
     if cool_conf:
         enabled_hvac_modes.append(HVAC_MODE_COOL)
-        hvac_def["cool"] = hvac_setting.HVAC_Setting(name, HVAC_MODE_COOL, cool_conf)
+        hvac_def[HVAC_MODE_COOL] = cool_conf
+        # hvac_def["cool"] = hvac_setting.HVAC_Setting(name, HVAC_MODE_COOL, cool_conf)
 
     async_add_entities(
         [
-            SmarterThermostat(
+            MultiZoneThermostat(
                 name,
                 unit,
                 unique_id,
@@ -680,8 +496,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     )
 
 
-class SmarterThermostat(ClimateEntity, RestoreEntity):
-    """Representation of a Smarter Thermostat device."""
+class MultiZoneThermostat(ClimateEntity, RestoreEntity):
+    """Representation of a MultiZone Thermostat device."""
 
     def __init__(
         self,
@@ -703,12 +519,19 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
     ):
         """Initialize the thermostat."""
         self._name = name
-        self._LOGGER = logging.getLogger(__name__).getChild(self._name)
+        self._LOGGER = logging.getLogger().getChild(
+            "multizone_thermostat." + self._name
+        )
+        self._LOGGER.info("initialise: %s", self._name)
         self._sensor_entity_id = sensor_entity_id
         self._sensor_out_entity_id = sensor_out_entity_id
         self._temp_precision = precision
         self._unit = unit
-        self._hvac_def = hvac_def
+        self._hvac_def = {}
+        for mode, mode_config in hvac_def.items():
+            self._hvac_def[mode] = hvac_setting.HVAC_Setting(
+                self._LOGGER.name, mode, mode_config
+            )
         self._hvac_mode = initial_hvac_mode
         self._preset_mode = initial_preset_mode
         self._enabled_hvac_mode = enabled_hvac_modes
@@ -719,7 +542,9 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         self._area = area
         self._emergency_stop = False
         self._current_temperature = None
+        self._last_current_temperature = None
         self._outdoor_temperature = None
+        self._last_outdoor_temperature = None
         self._old_mode = "off"
         self._hvac_on = None
         self._current_alive_time = None
@@ -860,13 +685,20 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                 self._LOGGER.debug("activate old hvac mode : %s", old_hvac_mode)
 
                 if "hvac_def" in old_state.attributes:
-                    self._LOGGER.debug("restore old controller settings")
-                    old_def = old_state.attributes["hvac_def"]
-                    for key, data in old_def.items():
-                        if key in list(self._hvac_def.keys()):
-                            self._hvac_def[key].restore_reboot(
-                                data, self._restore_parameters, self._restore_integral
-                            )
+                    try:
+                        self._LOGGER.debug("restore old controller settings")
+                        old_def = old_state.attributes["hvac_def"]
+                        for key, data in old_def.items():
+                            if key in list(self._hvac_def.keys()):
+                                self._hvac_def[key].restore_reboot(
+                                    data,
+                                    self._restore_parameters,
+                                    self._restore_integral,
+                                )
+                    except:
+                        self._LOGGER.warning(
+                            "error restoring old controller settings for: %s", key
+                        )
                 else:
                     self._LOGGER.warning("no old controller settings to restore")
 
@@ -896,7 +728,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                 self._hvac_mode = HVAC_MODE_OFF
 
             self._LOGGER.warning("init default hvac mode %s:", self._hvac_mode)
-            await self.async_set_hvac_mode(old_hvac_mode, init=True)
+            await self.async_set_hvac_mode(self._hvac_mode, init=True)
 
         # Ensure we update the current operation after changing the mode
         await self._async_operate()
@@ -908,7 +740,11 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         tmp_dict = {}
         for key, data in self._hvac_def.items():
             tmp_dict[key] = data.get_variable_attr
-        return {"hvac_def": tmp_dict, "room_area": self._area}
+        return {
+            "current_temp_filt": self.current_temperature,
+            "room_area": self._area,
+            "hvac_def": tmp_dict,
+        }
 
     async def async_set_min_diff(self, hvac_mode, min_diff):
         """Set new PID Controller min pwm value."""
@@ -977,6 +813,8 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             return
         else:
             self._hvac_on = self._hvac_def[self._hvac_mode]
+            if self._kf_temp:
+                self._kf_temp.interval = self._hvac_on.get_operate_cycle_time.seconds
 
             # reset time stamp pid to avoid integral run-off
             if self._hvac_on.is_hvac_proportional_mode:
@@ -999,6 +837,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
             # update listener
             await self._async_update_keep_alive(self._hvac_on.get_operate_cycle_time)
+
             if not init:
                 await self._async_operate()
 
@@ -1030,12 +869,19 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
 
             for satelite in satelites:
                 state = self.hass.states.get(satelite)
-                self._send_satelite(state)
+                if state:
+                    self._send_satelite(state)
 
     def _send_satelite(self, state):
         """send satelite data to current hvac mode"""
-        self._LOGGER.debug("update from satelite: %s", state.name)
-        if state.state == HVAC_MODE_OFF:
+        self._LOGGER.debug(
+            "update from satelite: %s to state %s", state.name, state.state
+        )
+        if state.state in [
+            STATE_OFF,
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
+        ]:
             setpoint = None
             current_temp = None
             area = state.attributes.get("room_area")
@@ -1126,7 +972,14 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
     async def _async_satelite_thermostat_changed(self, event):
         """Handle thermostat changes changes."""
         new_state = event.data.get("new_state")
-        self._LOGGER.debug("thermostat %s updated ", new_state.name)
+        if not new_state:
+            self._LOGGER.error("error receiving thermostat update. 'None' received")
+            return
+        self._LOGGER.debug(
+            "receiving thermostat %s update. new state: %s",
+            new_state.name,
+            new_state.state,
+        )
         self._send_satelite(new_state)
 
         # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
@@ -1137,7 +990,8 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
     async def _async_check_sensor_not_responding(self, now=None):
         """Check if the sensor has emitted a value during the allowed stale period."""
         entity_list = []
-        entity_list.append(self._sensor_entity_id)
+        if self._sensor_entity_id:
+            entity_list.append(self._sensor_entity_id)
         if self._sensor_out_entity_id:
             entity_list.append(self._sensor_out_entity_id)
 
@@ -1196,33 +1050,30 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             if not self._kf_temp and not current_temp:
                 self._current_temperature = None
             elif not self._kf_temp and current_temp:
-                # sigmas = JulierSigmaPoints(n=2, kappa=1)
-                sigmas = MerweScaledSigmaPoints(n=2, alpha=0.001, beta=2.0, kappa=0.0)
-                self._kf_temp = UnscentedKalmanFilter(
-                    dim_x=2, dim_z=1, dt=600, hx=hx, fx=fx, points=sigmas
-                )
-                self._kf_temp.x = np.array([float(current_temp), 0.0])
-                self._kf_temp.P *= 0.1  # initial uncertainty
-                self._kf_temp.R *= 0.05 ** 2  # measurement noise std**2
-                self._kf_temp.Q = Q_discrete_white_noise(
-                    dim=2, dt=600, var=0.05 ** 2
-                )  # process noise
-                self._kf_last_update = time.time()
+                if self._hvac_on:
+                    interval = self._hvac_on.get_operate_cycle_time.seconds
+                else:
+                    interval = 600
+                self._kf_temp = UKF_filter.filterr(float(current_temp), interval)
+                self._last_current_temperature = float(current_temp)
             else:
-                dt = time.time() - self._kf_last_update
-                self._kf_last_update = time.time()
-                self._kf_temp.predict(dt=dt)
+                self._kf_temp.kf_predict()
                 if current_temp:
-                    self._kf_temp.update(float(current_temp))
-                self._LOGGER.debug("kp update temp %s", self._kf_temp.x[0])
+                    self._kf_temp.kf_update(float(current_temp))
+                else:
+                    self._kf_temp.kf_update(self._last_current_temperature)
+                self._LOGGER.debug("kp update temp %s", self._kf_temp.get_temp)
 
             if self._kf_temp:
                 # store local in case current hvac mode is off
-                self._current_temperature = float(self._kf_temp.x[0])
+                self._current_temperature = float(self._kf_temp.get_temp)
 
-            if self._hvac_on:
-                self._hvac_on.current_temperature = self._current_temperature
-
+                if self._hvac_on and not self._hvac_on.is_master_mode:
+                    self._hvac_on.current_state = [
+                        self._kf_temp.get_temp,
+                        self._kf_temp.get_vel,
+                    ]
+            self.async_write_ha_state()
         except ValueError as ex:
             self._LOGGER.error("Unable to update from sensor: %s", ex)
 
@@ -1235,37 +1086,9 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                 self._LOGGER.debug(
                     "Current outdoor temperature updated to %s", current_temp
                 )
-
-            if not self._kf_out_temp and not current_temp:
-                self._outdoor_temperature = None
-            elif not self._kf_out_temp and current_temp:
-                # sigmas = JulierSigmaPoints(n=2, kappa=1)
-                sigmas = MerweScaledSigmaPoints(n=2, alpha=0.001, beta=2.0, kappa=0.0)
-                self._kf_out_temp = UnscentedKalmanFilter(
-                    dim_x=2, dim_z=1, dt=600, hx=hx, fx=fx, points=sigmas
-                )
-                self._kf_out_temp.x = np.array([float(current_temp), 0.0])
-                self._kf_out_temp.P *= 0.1  # initial uncertainty
-                self._kf_out_temp.R *= 0.05 ** 2  # measurement noise std**2
-                self._kf_out_temp.Q = Q_discrete_white_noise(
-                    dim=2, dt=600, var=0.05 ** 2
-                )
-                self._kf_last_out_update = time.time()
-            else:
-                dt = time.time() - self._kf_last_out_update
-                self._kf_last_out_update = time.time()
-                self._kf_out_temp.predict(dt=dt)
-                if current_temp:
-                    self._kf_out_temp.update(float(current_temp))
-                self._LOGGER.debug("kp update outdoor temp %s", self._kf_out_temp.x[0])
-
-            if self._kf_out_temp:
-                # store local in case current hvac mode is off
-                self._outdoor_temperature = float(self._kf_out_temp.x[0])
-
-            if self._hvac_on:
-                self._hvac_on.outdoor_temperature = self._outdoor_temperature
-
+                self._outdoor_temperature = float(current_temp)
+                if self._hvac_on:
+                    self._hvac_on.outdoor_temperature = self._outdoor_temperature
         except ValueError as ex:
             self._LOGGER.error("Unable to update from sensor: %s", ex)
 
@@ -1289,7 +1112,7 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
                 return
 
             # update and check current temperatures
-            if not sensor_changed:
+            if not sensor_changed and not self._hvac_on.is_master_mode:
                 self._update_current_temp()
 
             if self._hvac_on.current_temperature is None:
@@ -1466,7 +1289,8 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
             _hvac_def = self._hvac_def[hvac_def]
         else:
             _hvac_def = self._hvac_on
-        entity_id = _hvac_def.get_hvac_switch
+        if _hvac_def:
+            entity_id = _hvac_def.get_hvac_switch
 
         if _hvac_def.is_hvac_switch_on_off:
             if not self._is_switch_active(hvac_def=hvac_def) and not force:
@@ -1604,7 +1428,11 @@ class SmarterThermostat(ClimateEntity, RestoreEntity):
         if self._hvac_mode == HVAC_MODE_OFF:
             return None
 
-        return self._hvac_on.current_temperature
+        return (
+            round(self._hvac_on.current_temperature, 3)
+            if self._hvac_on.current_temperature
+            else self._hvac_on.current_temperature
+        )
 
     @property
     def outdoor_temperature(self):
