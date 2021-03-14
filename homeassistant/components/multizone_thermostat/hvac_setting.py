@@ -32,6 +32,7 @@ CONF_HYSTERESIS_TOLERANCE_OFF = "hysteresis_tolerance_off"
 # proportional mode
 CONF_PROPORTIONAL_MODE = "proportional_mode"
 CONF_PWM = "pwm"
+CONF_SENSOR_FILTER = "sensor_filter"
 CONF_CONTROL_REFRESH_INTERVAL = "control_interval"
 CONF_DIFFERENCE = "difference"
 CONF_MIN_DIFFERENCE = "min_difference"
@@ -268,12 +269,15 @@ class HVAC_Setting:
         for hvac_data in hvacs:
             if CONF_SATELITES in hvac_data:
                 current = self._master_max_valve_pos
+                current_temp = current
                 setpoint = self.goal
             else:
                 if isinstance(self.current_state, (list, tuple, np.ndarray)):
                     current = self.current_state
+                    current_temp = current[0]
                 else:
                     current = self.current_temperature
+                    current_temp = current
                 setpoint = self.target_temperature
             if hvac_data.PID["_autotune_state"]:
                 self._LOGGER.debug("Autotune mode")
@@ -327,7 +331,7 @@ class HVAC_Setting:
 
                 hvac_data["control_output"] = hvac_data.PID["pidAutotune"].output
             else:
-                if CONF_SATELITES in hvac_data and current == 0:
+                if CONF_SATELITES in hvac_data and current_temp == 0:
                     hvac_data["control_output"] = 0
                 else:
                     hvac_data["control_output"] = hvac_data.PID["pidController"].calc(
@@ -412,7 +416,7 @@ class HVAC_Setting:
     def get_pwm_mode(self):
         """return pwm interval time"""
         if self.is_hvac_proportional_mode:
-            return self._proportional[CONF_PWM]
+            return self._proportional[CONF_PWM].seconds
         else:
             return None
 
@@ -498,7 +502,8 @@ class HVAC_Setting:
     @current_state.setter
     def current_state(self, state):
         self._current_state = state
-        self.current_temperature = state[0]
+        if self._current_state:
+            self.current_temperature = state[0]
 
     @property
     def current_temperature(self):
@@ -613,6 +618,16 @@ class HVAC_Setting:
             kd = hvac_data[CONF_KD]
         return (kp, ki, kd)
 
+    @property
+    def filter_mode(self):
+        """Return the UKF mode."""
+        return self._proportional[CONF_SENSOR_FILTER]
+
+    @filter_mode.setter
+    def filter_mode(self, mode):
+        """Set the UKF mode."""
+        self._proportional[CONF_SENSOR_FILTER] = mode
+
     def set_pid_param(self, hvac_data, kp=None, ki=None, kd=None, update=False):
         """Set PID parameters."""
         hvac_data = self.get_hvac_data(hvac_data)
@@ -643,7 +658,7 @@ class HVAC_Setting:
 
     def set_integral(self, hvac_data, integral):
         hvac_data = self.get_hvac_data(hvac_data)
-        hvac_data.PID["pidController"].integral(integral)
+        hvac_data.PID["pidController"].integral = integral
 
     @property
     def get_ka_kb_param(self):
