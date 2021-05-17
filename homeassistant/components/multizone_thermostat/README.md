@@ -111,6 +111,7 @@ To save the parameters read the climate entity attributes, and copy the values t
 * unique_id (Optional): specify name for entity in registry else unique name is based on specified sensors and switches
 * room_area (Optional): ratio (room area) for averiging thermostat when required when operating as satelite. Default is 0
 * sensor_stale_duration (Optional): safety to turn switches of when sensor has not updated wthin specified period. Default no check
+* passive_switch_check (Optional): check at midnight if switch hasn't been operated for a secified time (passive_switch_duration) to avoid stuck/jammed valve. Default is False.
 * restore_from_old_state (Optional): restore certain old configuration and modes after restart. (setpoints, KP,KI,PD values, modes). Default is False
 * restore_parameters (Optional): specify if previous controller parameters need to be restored. Default is false
 * restore_integral (Optional): If PID integral needs to be restored. Avoid long restoration times. Default is false
@@ -124,7 +125,7 @@ with the data (as sub)::
 * max_temp (Optional): Set maximum set point available (default: 24(heat) or 35 (cool)).
 * initial_target_temp (Optional): Set initial target temperature. Failure to set this variable will result in target temperature being set to null on startup.(default: 19(heat) or 28 (cool)).
 * away_temp (Optional): Set the temperature used by “away_mode”. If this is not specified, away_mode feature will not get activated.
-
+* passive_swith_duration (Optional): specifiy per switch the maximum time before forcing toggle to avoid jammed valve.
 further define one of: 'on_off_mode' or 'proportional_mode'
 
 #### on_off mode:

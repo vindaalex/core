@@ -22,6 +22,8 @@ CONF_HVAC_MODE_MIN_TEMP = "min_temp"
 CONF_HVAC_MODE_MAX_TEMP = "max_temp"
 CONF_AWAY_TEMP = "away_temp"
 
+CONF_PASSIVE_SWITCH_DURATION = "passive_switch_duration"
+
 # on_off thermostat
 CONF_ON_OFF_MODE = "on_off_mode"
 CONF_MIN_CYCLE_DURATION = "min_cycle_duration"
@@ -398,6 +400,14 @@ class HVAC_Setting:
     def get_hvac_switch(self):
         """return the switch entity"""
         return self._swtich_entity
+
+    @property
+    def get_switch_stale(self):
+        """return the switch max passive duration"""
+        if CONF_PASSIVE_SWITCH_DURATION in self._hvac_settings:
+            return self._hvac_settings[CONF_PASSIVE_SWITCH_DURATION]
+        else:
+            return None
 
     @property
     def get_target_temp_limits(self):
