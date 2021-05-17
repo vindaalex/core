@@ -138,12 +138,12 @@ CONF_MIN_DIFFERENCE = "min_difference"
 CONF_MAX_DIFFERENCE = "max_difference"
 CONF_MIN_DIFF = "minimal_diff"
 
-# proportional valve control (pid/pwm)
+# proportional valve control (pwm)
 SERVICE_SET_VALUE = "set_value"
 ATTR_VALUE = "value"
 PLATFORM_INPUT_NUMBER = "input_number"
 
-# PWM/PID controller
+# PID controller
 CONF_PID_MODE = "PID_mode"
 CONF_KP = "kp"
 CONF_KI = "ki"

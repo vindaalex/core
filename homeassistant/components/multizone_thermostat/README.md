@@ -32,6 +32,11 @@ Two control modes are included to control the thermostat:
 proportional controller will be called periodically.
 If no pwm interval is defined, it will set the state of "heater" from 0 to "difference" value. Else, it will turn off and on the heater proportionally.
 
+#### sensor filter:
+An unscneted kalman filter is present to smoothen the temperature readings in case of of irregular updates. This could be the case for battery operated temperature sensors such as zigbee devices. This can be usefull in case of PID controller where derivative is controlled (speed of temperature change).
+The filter intesity is defined by a factor between 0 to 5 (integer).
+0 = no filter
+5 = max smoothing
 
 #### PID controller:
 https://en.wikipedia.org/wiki/PID_controller
@@ -144,6 +149,7 @@ with the data (as sub):
 * minimal_diff (Optional): Set the minimal difference before activating swtich. To avoid very short off-on-off changes. Default is off
 * difference (Optional): Set analog output offset to 0 (default 100). Example: If it's 500 the output Value can be everything between 0 and 500.
 * pwm (Optional): Set period time for pwm signal in seconds. If it's not set, pwm is sending proportional value to switch. Default = 0
+* sensor_filter(Optional): use unscented kalman filter to smoothen the temperature sensor readings. Especially usefull in case of irregular sensor updates such as battery operated devices (for instance zigbee sensor). Default = 0 (off) (see section 'sensor filter' for more details)
 
 controller modes: (PID, Linear, Master)
 
@@ -446,3 +452,23 @@ master - satelite mode
     restore_integral: True
 ```
 
+
+examples to use attribute data
+
+get valve position
+```
+  - platform: template
+    sensors:
+      valve_position:
+        friendly_name: 'main valveposition'
+        value_template: "{{ state_attr('climate.mainswitch', 'hvac_def')['heat']['valve_pos'] | float}}"
+        unit_of_measurement: "%"
+
+get (filtered) room temperature
+
+  - platform: template
+    sensors:
+      temperature_room1:
+        friendly_name: 'temperature room1'
+        value_template: "{{ state_attr('climate.room1', 'current_temp_filt') | float}}"
+        unit_of_measurement: "°C"
